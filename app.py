@@ -25,6 +25,9 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config
 from models.schemas import CourseLMS, TTSRequest
 
+# Import WebSocket server
+from websocket_server import run_websocket_server_in_thread
+
 # Import services
 try:
     from services.chat_service import ChatService
@@ -837,6 +840,19 @@ async def serve_stream_test():
 async def serve_websocket_status():
     return FileResponse(os.path.join(web_dir, 'websocket-status.html'))
 
+@app.get("/profai-websocket-test")
+async def serve_profai_websocket_test():
+    return FileResponse(os.path.join(web_dir, 'profai-websocket-test.html'))
+
+@app.get("/test-web-websocket")
+async def serve_test_web_websocket():
+    return FileResponse(os.path.join(web_dir, 'test_web_websocket.html'))
+
 if __name__ == "__main__":
+    # Start WebSocket server in background thread
+    websocket_thread = run_websocket_server_in_thread("0.0.0.0", 8765)
+    print("🌐 WebSocket server started on ws://localhost:8765")
+    
+    # Start FastAPI server
     import uvicorn
     uvicorn.run(app, host=config.HOST, port=config.PORT, log_level="info")

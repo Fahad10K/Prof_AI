@@ -10,7 +10,10 @@ class LLMService:
     """Service for OpenAI LLM interactions."""
     
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+        self.client = AsyncOpenAI(
+            api_key=config.OPENAI_API_KEY,
+            timeout=8.0  # 8 second timeout for all requests
+        )
     
     async def get_general_response(self, query: str, target_language: str = "English") -> str:
         """Get a general response from the LLM."""

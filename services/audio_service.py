@@ -6,6 +6,7 @@ import io
 from typing import Optional
 import config
 from services.sarvam_service import SarvamService
+from utils.connection_monitor import is_client_connected, is_normal_closure
 
 class AudioService:
     """Service for audio processing operations."""
@@ -35,13 +36,60 @@ class AudioService:
                 config.SARVAM_TTS_SPEAKER
             )
     
-    async def stream_audio_from_text(self, text: str, language: Optional[str] = None):
+    async def stream_audio_from_text(self, text: str, language: Optional[str] = None, websocket=None):
         """Stream audio chunks as they're generated for real-time playback."""
         effective_language = language or config.SUPPORTED_LANGUAGES[0]['code']
         
-        async for audio_chunk in self.sarvam_service.stream_audio_generation(
-            text, 
-            effective_language, 
-            config.SARVAM_TTS_SPEAKER
-        ):
-            yield audio_chunk
+        try:
+            async for audio_chunk in self.sarvam_service.stream_audio_generation(
+                text, 
+                effective_language, 
+                config.SARVAM_TTS_SPEAKER,
+                websocket
+            ):
+                if audio_chunk and len(audio_chunk) > 0:
+                    yield audio_chunk
+        except Exception as e:
+            error_msg = str(e)
+            # Check if this is a normal disconnection
+            if self._is_normal_disconnection(error_msg):
+                print(f"🔌 Client disconnected during audio streaming: {e}")
+                print(f"⚠️ Stopping audio streaming - client no longer connected")
+                return
+            else:
+                print(f"❌ Error in audio streaming: {e}")
+                # Only fallback for actual errors, not disconnections
+                if not websocket or not self._is_client_disconnected(websocket):
+                    try:
+                        audio_buffer = await self.generate_audio_from_text(text, language, ultra_fast=True)
+                        if audio_buffer and audio_buffer.getbuffer().nbytes > 0:
+                            # Yield the entire audio as a single chunk
+                            yield audio_buffer.getvalue()
+                    except Exception as fallback_error:
+                        print(f"Fallback audio generation also failed: {fallback_error}")
+                        # Return empty generator
+                        return
+    
+    def _is_client_disconnected(self, websocket) -> bool:
+        """Check if WebSocket client is disconnected."""
+        return not is_client_connected(websocket)
+    
+    def _is_normal_disconnection(self, error_msg: str) -> bool:
+        """Check if error message indicates a normal client disconnection."""
+        try:
+            # Check for normal WebSocket closure codes
+            if "1000" in str(error_msg) or "1001" in str(error_msg):
+                return True
+            
+            # Check for common disconnection phrases
+            error_msg = str(error_msg).lower()
+            disconnection_phrases = [
+                "connection closed",
+                "client disconnected", 
+                "going away",
+                "connection lost"
+            ]
+            
+            return any(phrase in error_msg for phrase in disconnection_phrases)
+        except Exception:
+            return False

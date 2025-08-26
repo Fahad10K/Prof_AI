@@ -21,6 +21,10 @@ class DocumentService:
     def __init__(self):
         self.document_processor = DocumentProcessor()
     
+    async def process_pdfs_and_generate_course(self, pdf_files: List[UploadFile], course_title: str = None):
+        """Process uploaded PDF files and generate course content."""
+        return self.process_uploaded_pdfs(pdf_files, course_title)
+    
     def process_uploaded_pdfs(self, pdf_files: List[UploadFile], course_title: str = None):
         """Process uploaded PDF files and generate course content."""
         try:

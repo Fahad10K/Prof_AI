@@ -61,7 +61,7 @@ class TeachingService:
         language: str = "en-IN"
     ) -> str:
         """
-        Convert raw course content into a proper teaching format.
+        Convert raw course content into a proper teaching format with timeout handling.
         
         Args:
             module_title: The module/week title
@@ -73,20 +73,31 @@ class TeachingService:
             Formatted teaching content ready for TTS
         """
         try:
+            # Truncate content if too long to avoid timeout
+            if len(raw_content) > 6000:
+                raw_content = raw_content[:5500] + "..."
+                logging.info(f"Truncated content to 5500 chars for faster processing")
+            
             # Create a comprehensive teaching prompt
             teaching_prompt = self._create_teaching_prompt(
                 module_title, sub_topic_title, raw_content, language
             )
             
-            # Generate teaching content using LLM
-            teaching_content = await self.llm_service.generate_response(teaching_prompt)
+            # Generate teaching content using LLM with timeout
+            teaching_content = await asyncio.wait_for(
+                self.llm_service.generate_response(teaching_prompt, temperature=0.7),
+                timeout=5.0  # 5 second timeout for LLM generation
+            )
             
             # Post-process the content for better TTS delivery
             formatted_content = self._format_for_tts(teaching_content)
             
-            logging.info(f"Generated teaching content for: {sub_topic_title}")
+            logging.info(f"Generated teaching content for: {sub_topic_title} ({len(formatted_content)} chars)")
             return formatted_content
             
+        except asyncio.TimeoutError:
+            logging.warning(f"Teaching content generation timeout for: {sub_topic_title}")
+            return self._create_fallback_content(module_title, sub_topic_title, raw_content)
         except Exception as e:
             logging.error(f"Error generating teaching content: {e}")
             # Fallback to basic format if LLM fails
@@ -184,14 +195,33 @@ Begin the lesson:"""
         raw_content: str
     ) -> str:
         """Create basic teaching content if LLM fails."""
-        return f"""Welcome to today's lesson on {sub_topic_title} from {module_title}. 
+        # Extract first meaningful paragraph or sentences
+        import re
         
-        Let me explain this topic to you. ... {raw_content} ... 
+        # Clean the raw content
+        cleaned_content = re.sub(r'#+ ', '', raw_content)  # Remove markdown headers
+        cleaned_content = re.sub(r'\n+', ' ', cleaned_content)  # Replace newlines with spaces
+        cleaned_content = re.sub(r'\s+', ' ', cleaned_content)  # Normalize spaces
         
-        This covers the key concepts you need to understand about {sub_topic_title}. 
+        # Take first 800 characters for a reasonable explanation
+        if len(cleaned_content) > 800:
+            # Try to end at a sentence boundary
+            truncated = cleaned_content[:800]
+            last_period = truncated.rfind('.')
+            if last_period > 600:  # Only if we don't lose too much
+                cleaned_content = truncated[:last_period + 1]
+            else:
+                cleaned_content = truncated + "."
         
-        I hope this explanation helps you grasp the important points. 
-        Please feel free to ask if you have any questions about this topic."""
+        return f"""Welcome to today's lesson on {sub_topic_title} from the module {module_title}. 
+
+Let me explain this important topic to you.
+
+{cleaned_content}
+
+This covers the key concepts you need to understand about {sub_topic_title}. I hope this explanation helps you grasp the important points. 
+
+Please feel free to ask if you have any questions about this topic. Thank you for your attention."""
 
     async def generate_lesson_outline(
         self, 
