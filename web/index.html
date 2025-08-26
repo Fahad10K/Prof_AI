@@ -185,7 +185,7 @@
             </div>
         </div>
 
-        <!-- Center - Humanoid Figure -->
+        <!-- Center - Humanoid Figure and Class Controls -->
         <div class="flex-1 flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
             <div class="text-center">
                 <div class="humanoid-figure">
@@ -199,6 +199,49 @@
                 <h3 class="mt-6 text-2xl font-bold text-gray-800">Welcome to ProfessorAI</h3>
                 <p class="mt-2 text-gray-600">Your AI-powered educational companion</p>
                 <p class="mt-1 text-sm text-gray-500">Ask questions about your course content or explore modules</p>
+                
+                <!-- Class Controls -->
+                <div class="mt-8 space-y-4">
+                    <!-- Module Selection -->
+                    <div class="bg-white rounded-lg p-4 shadow-md max-w-md mx-auto">
+                        <h4 class="font-semibold text-gray-800 mb-3">Select Module to Teach</h4>
+                        <select id="moduleSelect" class="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 mb-3">
+                            <option value="">Select a module...</option>
+                        </select>
+                        <select id="subTopicSelect" class="w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 mb-3" disabled>
+                            <option value="">Select a sub-topic...</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Class Control Buttons -->
+                    <div class="flex justify-center space-x-4">
+                        <button id="startClassButton" 
+                            class="px-6 py-3 bg-green-600 text-white rounded-lg font-semibold hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            disabled>
+                            🎓 Start the Class
+                        </button>
+                        <button id="pauseClassButton" 
+                            class="px-6 py-3 bg-yellow-600 text-white rounded-lg font-semibold hover:bg-yellow-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            disabled>
+                            ⏸️ Pause
+                        </button>
+                        <button id="stopClassButton" 
+                            class="px-6 py-3 bg-red-600 text-white rounded-lg font-semibold hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            disabled>
+                            ⏹️ Stop
+                        </button>
+                    </div>
+                    
+                    <!-- Class Status -->
+                    <div id="classStatus" class="text-center text-sm text-gray-600 mt-4 h-6"></div>
+                    
+                    <!-- Teaching Content Preview -->
+                    <div id="teachingPreview" class="hidden mt-4 bg-white rounded-lg p-4 shadow-md max-w-2xl mx-auto">
+                        <h4 class="font-semibold text-gray-800 mb-2">Teaching Content Preview:</h4>
+                        <div id="previewContent" class="text-sm text-gray-700 max-h-32 overflow-y-auto bg-gray-50 p-3 rounded border"></div>
+                        <button id="hidePreviewButton" class="mt-2 text-xs text-blue-600 hover:text-blue-800">Hide Preview</button>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -267,9 +310,21 @@
         const audioPlayback = document.getElementById('audioPlayback');
         const languageSelect = document.getElementById('languageSelect');
         const courseModules = document.getElementById('courseModules');
+        const moduleSelect = document.getElementById('moduleSelect');
+        const subTopicSelect = document.getElementById('subTopicSelect');
+        const startClassButton = document.getElementById('startClassButton');
+        const pauseClassButton = document.getElementById('pauseClassButton');
+        const stopClassButton = document.getElementById('stopClassButton');
+        const classStatus = document.getElementById('classStatus');
+        const teachingPreview = document.getElementById('teachingPreview');
+        const previewContent = document.getElementById('previewContent');
+        const hidePreviewButton = document.getElementById('hidePreviewButton');
 
         // State
         let mediaRecorder, audioChunks = [], isRecording = false;
+        let currentCourse = null;
+        let classAudio = null;
+        let isClassPlaying = false;
 
         // Supported Languages
         const SUPPORTED_LANGUAGES = [
@@ -290,6 +345,7 @@
         function init() {
             populateLanguages();
             loadCourseModules();
+            setupClassControls();
         }
 
         function populateLanguages() {
@@ -310,59 +366,94 @@
                 const courses = await response.json();
                 if (courses.length === 0) {
                     courseModules.innerHTML = '<div class="text-gray-500 text-center py-8"><p>No courses available.<br>Upload PDFs to generate content.</p></div>';
+                    moduleSelect.innerHTML = '<option value="">No courses available</option>';
                     return;
                 }
 
-                // Display the first course modules
-                const course = courses[0];
-                displayCourseModules(course);
+                // Store the first course for class functionality
+                currentCourse = courses[0];
+                
+                // Display the first course modules in sidebar
+                displayCourseModules(currentCourse);
+                
+                // Populate module selector
+                populateModuleSelector(currentCourse);
+                
             } catch (error) {
                 console.error('Error loading courses:', error);
                 courseModules.innerHTML = '<div class="text-red-500 text-center py-8"><p>Error loading courses</p></div>';
+                moduleSelect.innerHTML = '<option value="">Error loading courses</option>';
             }
         }
 
-        function displayCourseModules(course) {
-            courseModules.innerHTML = `
-                <div class="mb-4">
-                    <h3 class="font-semibold text-gray-800 mb-2">${course.course_title}</h3>
-                </div>
-            `;
+        function populateModuleSelector(course) {
+            moduleSelect.innerHTML = '<option value="">Select a module...</option>';
+            
+            course.modules.forEach((module, index) => {
+                const option = document.createElement('option');
+                option.value = index;
+                option.textContent = `Week ${module.week}: ${module.title}`;
+                moduleSelect.appendChild(option);
+            });
+        }
 
-            course.modules.forEach((module, moduleIndex) => {
-                const moduleDiv = document.createElement('div');
-                moduleDiv.className = 'mb-3';
+        async function displayCourseModules(course) {
+            try {
+                // Fetch detailed course content
+                const response = await fetch(`${API_BASE_URL}/api/course/${course.course_id}`);
+                if (!response.ok) throw new Error('Failed to load course details');
                 
-                const moduleHeader = document.createElement('div');
-                moduleHeader.className = 'module-item p-3 bg-gray-100 rounded-lg font-medium text-gray-800';
-                moduleHeader.innerHTML = `
-                    <div class="flex justify-between items-center">
-                        <span>Week ${module.week}: ${module.title}</span>
-                        <span class="text-gray-500">▼</span>
+                const courseDetails = await response.json();
+                
+                courseModules.innerHTML = `
+                    <div class="mb-4">
+                        <h3 class="font-semibold text-gray-800 mb-2">${courseDetails.course_title}</h3>
                     </div>
                 `;
-                
-                const subTopicsDiv = document.createElement('div');
-                subTopicsDiv.className = 'mt-2 space-y-1 hidden';
-                
-                module.sub_topics.forEach((subTopic, subIndex) => {
-                    const subTopicDiv = document.createElement('div');
-                    subTopicDiv.className = 'sub-topic-item p-2 text-sm text-gray-700 rounded hover:bg-gray-100';
-                    subTopicDiv.textContent = subTopic.title;
-                    subTopicDiv.onclick = () => askAboutTopic(subTopic.title);
-                    subTopicsDiv.appendChild(subTopicDiv);
+
+                courseDetails.modules.forEach((module, moduleIndex) => {
+                    const moduleDiv = document.createElement('div');
+                    moduleDiv.className = 'mb-3';
+                    
+                    const moduleHeader = document.createElement('div');
+                    moduleHeader.className = 'module-item p-3 bg-gray-100 rounded-lg font-medium text-gray-800';
+                    moduleHeader.innerHTML = `
+                        <div class="flex justify-between items-center">
+                            <span>Week ${module.week}: ${module.title}</span>
+                            <span class="text-gray-500">▼</span>
+                        </div>
+                    `;
+                    
+                    const subTopicsDiv = document.createElement('div');
+                    subTopicsDiv.className = 'mt-2 space-y-1 hidden';
+                    
+                    module.sub_topics.forEach((subTopic, subIndex) => {
+                        const subTopicDiv = document.createElement('div');
+                        subTopicDiv.className = 'sub-topic-item p-2 text-sm text-gray-700 rounded hover:bg-gray-100';
+                        subTopicDiv.textContent = subTopic.title;
+                        subTopicDiv.onclick = () => askAboutTopic(subTopic.title);
+                        subTopicsDiv.appendChild(subTopicDiv);
+                    });
+                    
+                    moduleHeader.onclick = () => {
+                        const isHidden = subTopicsDiv.classList.contains('hidden');
+                        subTopicsDiv.classList.toggle('hidden');
+                        moduleHeader.querySelector('span:last-child').textContent = isHidden ? '▲' : '▼';
+                    };
+                    
+                    moduleDiv.appendChild(moduleHeader);
+                    moduleDiv.appendChild(subTopicsDiv);
+                    courseModules.appendChild(moduleDiv);
                 });
                 
-                moduleHeader.onclick = () => {
-                    const isHidden = subTopicsDiv.classList.contains('hidden');
-                    subTopicsDiv.classList.toggle('hidden');
-                    moduleHeader.querySelector('span:last-child').textContent = isHidden ? '▲' : '▼';
-                };
+                // Update currentCourse with detailed data
+                currentCourse = courseDetails;
+                populateModuleSelector(courseDetails);
                 
-                moduleDiv.appendChild(moduleHeader);
-                moduleDiv.appendChild(subTopicsDiv);
-                courseModules.appendChild(moduleDiv);
-            });
+            } catch (error) {
+                console.error('Error loading course details:', error);
+                courseModules.innerHTML = '<div class="text-red-500 text-center py-8"><p>Error loading course details</p></div>';
+            }
         }
 
         function askAboutTopic(topicTitle) {
@@ -397,6 +488,45 @@
             chatHistory.scrollTop = chatHistory.scrollHeight;
         }
 
+        async function playAudioFromBase64(audioBase64) {
+            // Play audio from base64 data
+            try {
+                console.log('Playing audio from base64 data');
+                statusMessage.textContent = 'Loading speech...';
+                
+                // Convert base64 to blob
+                const audioBytes = atob(audioBase64);
+                const audioArray = new Uint8Array(audioBytes.length);
+                for (let i = 0; i < audioBytes.length; i++) {
+                    audioArray[i] = audioBytes.charCodeAt(i);
+                }
+                const audioBlob = new Blob([audioArray], { type: 'audio/mpeg' });
+                
+                // Create and play audio
+                const audioUrl = URL.createObjectURL(audioBlob);
+                const audio = new Audio(audioUrl);
+                
+                audio.oncanplay = () => {
+                    statusMessage.textContent = 'Playing response...';
+                    audio.play();
+                };
+                audio.onplay = () => statusMessage.textContent = 'Speaking...';
+                audio.onended = () => {
+                    statusMessage.textContent = '';
+                    URL.revokeObjectURL(audioUrl); // Clean up
+                };
+                audio.onerror = () => {
+                    console.error('Error playing audio');
+                    statusMessage.textContent = '';
+                    URL.revokeObjectURL(audioUrl);
+                };
+                
+            } catch (error) {
+                console.error('Error playing audio from base64:', error);
+                statusMessage.textContent = '';
+            }
+        }
+
         async function handleSendText() {
             const query = textInput.value.trim();
             if (!query) return;
@@ -407,7 +537,10 @@
             toggleButtons(true);
 
             try {
-                const response = await fetch(`${API_BASE_URL}/api/chat`, {
+                console.log('Sending chat request:', { message: query, language: languageSelect.value });
+                console.log('API URL:', `${API_BASE_URL}/api/chat`);
+                
+                const response = await fetch(`${API_BASE_URL}/api/chat-with-audio`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ 
@@ -416,12 +549,32 @@
                     })
                 });
                 
-                if (!response.ok) throw new Error('Failed to get response');
+                console.log('Response status:', response.status);
+                console.log('Response headers:', Object.fromEntries(response.headers.entries()));
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('Response error:', errorText);
+                    throw new Error(`Server error: ${response.status} - ${errorText}`);
+                }
+                
                 const data = await response.json();
-                addMessage(data.response, 'ai', data.sources || []);
+                console.log('Response data:', data);
+                
+                if (data.answer || data.response) {
+                    const aiResponse = data.answer || data.response;
+                    addMessage(aiResponse, 'ai', data.sources || []);
+                    
+                    // Play audio if available
+                    if (data.has_audio && data.audio) {
+                        await playAudioFromBase64(data.audio);
+                    }
+                } else {
+                    addMessage('No response received from server.', 'ai');
+                }
             } catch (err) {
-                addMessage('Sorry, an error occurred.', 'ai');
-                console.error(err);
+                console.error('Chat error:', err);
+                addMessage(`Sorry, an error occurred: ${err.message}`, 'ai');
             } finally {
                 statusMessage.textContent = '';
                 toggleButtons(false);
@@ -491,6 +644,175 @@
                 handleSendText();
             }
         });
+
+        // Class Control Functions
+        function setupClassControls() {
+            moduleSelect.addEventListener('change', function() {
+                const moduleIndex = parseInt(this.value);
+                if (isNaN(moduleIndex) || !currentCourse) {
+                    subTopicSelect.innerHTML = '<option value="">Select a sub-topic...</option>';
+                    subTopicSelect.disabled = true;
+                    startClassButton.disabled = true;
+                    return;
+                }
+
+                const module = currentCourse.modules[moduleIndex];
+                subTopicSelect.innerHTML = '<option value="">Select a sub-topic...</option>';
+                
+                module.sub_topics.forEach((subTopic, index) => {
+                    const option = document.createElement('option');
+                    option.value = index;
+                    option.textContent = subTopic.title;
+                    subTopicSelect.appendChild(option);
+                });
+                
+                subTopicSelect.disabled = false;
+            });
+
+            subTopicSelect.addEventListener('change', function() {
+                const subTopicIndex = parseInt(this.value);
+                startClassButton.disabled = isNaN(subTopicIndex);
+            });
+
+            startClassButton.addEventListener('click', startClass);
+            pauseClassButton.addEventListener('click', pauseClass);
+            stopClassButton.addEventListener('click', stopClass);
+            hidePreviewButton.addEventListener('click', () => {
+                teachingPreview.classList.add('hidden');
+            });
+        }
+
+        async function startClass() {
+            const moduleIndex = parseInt(moduleSelect.value);
+            const subTopicIndex = parseInt(subTopicSelect.value);
+            
+            console.log('Starting class with:', { moduleIndex, subTopicIndex, currentCourse: currentCourse?.course_id });
+            
+            if (isNaN(moduleIndex) || isNaN(subTopicIndex) || !currentCourse) {
+                const errorMsg = 'Please select a module and sub-topic first';
+                alert(errorMsg);
+                classStatus.textContent = errorMsg;
+                return;
+            }
+
+            try {
+                classStatus.textContent = 'Preparing enhanced teaching content...';
+                startClassButton.disabled = true;
+
+                // Show real-time content generation
+                teachingPreview.classList.remove('hidden');
+                previewContent.innerHTML = '<div class="text-blue-600">Generating teaching content in real-time...</div>';
+                
+                // First get content preview
+                console.log('Getting class content preview...');
+                const previewResponse = await fetch(`${API_BASE_URL}/api/start-class`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        course_id: currentCourse.course_id,
+                        module_index: moduleIndex,
+                        sub_topic_index: subTopicIndex,
+                        language: languageSelect.value,
+                        content_only: true
+                    })
+                });
+                
+                if (previewResponse.ok) {
+                    const previewData = await previewResponse.json();
+                    previewContent.textContent = previewData.content_preview;
+                    console.log('Content preview loaded');
+                }
+
+                classStatus.textContent = 'Generating class audio...';
+
+                // Generate class audio
+                const audioResponse = await fetch(`${API_BASE_URL}/api/start-class`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        course_id: currentCourse.course_id,
+                        module_index: moduleIndex,
+                        sub_topic_index: subTopicIndex,
+                        language: languageSelect.value,
+                        content_only: false
+                    })
+                });
+
+                if (!audioResponse.ok) {
+                    throw new Error('Failed to generate class audio');
+                }
+
+                console.log('Processing class audio response...');
+                const audioBlob = await audioResponse.blob();
+                console.log('Audio blob size:', audioBlob.size);
+                
+                if (audioBlob.size === 0) {
+                    throw new Error('Received empty audio response');
+                }
+                
+                const audioUrl = URL.createObjectURL(audioBlob);
+                console.log('Audio URL created:', audioUrl);
+                
+                classAudio = new Audio(audioUrl);
+                classAudio.onloadstart = () => classStatus.textContent = 'Loading enhanced class audio...';
+                classAudio.oncanplay = () => {
+                    classStatus.textContent = 'Enhanced class is ready to start!';
+                    classAudio.play();
+                    isClassPlaying = true;
+                    updateClassButtons();
+                };
+                classAudio.onplay = () => classStatus.textContent = 'AI Professor is teaching...';
+                classAudio.onpause = () => classStatus.textContent = 'Class is paused';
+                classAudio.onended = () => {
+                    classStatus.textContent = 'Class completed! Great job learning!';
+                    isClassPlaying = false;
+                    updateClassButtons();
+                };
+                classAudio.onerror = () => {
+                    classStatus.textContent = 'Error playing class audio';
+                    isClassPlaying = false;
+                    updateClassButtons();
+                };
+
+            } catch (error) {
+                console.error('Error starting class:', error);
+                classStatus.textContent = `Error starting class: ${error.message}`;
+                startClassButton.disabled = false;
+                alert(`Class Error: ${error.message}`);
+            }
+        }
+
+        function pauseClass() {
+            if (classAudio && isClassPlaying) {
+                if (classAudio.paused) {
+                    classAudio.play();
+                    pauseClassButton.textContent = '⏸️ Pause';
+                } else {
+                    classAudio.pause();
+                    pauseClassButton.textContent = '▶️ Resume';
+                }
+            }
+        }
+
+        function stopClass() {
+            if (classAudio) {
+                classAudio.pause();
+                classAudio.currentTime = 0;
+                isClassPlaying = false;
+                classStatus.textContent = 'Class stopped';
+                updateClassButtons();
+            }
+        }
+
+        function updateClassButtons() {
+            startClassButton.disabled = isClassPlaying || moduleSelect.value === '' || subTopicSelect.value === '';
+            pauseClassButton.disabled = !isClassPlaying;
+            stopClassButton.disabled = !isClassPlaying;
+            
+            if (!isClassPlaying) {
+                pauseClassButton.textContent = '⏸️ Pause';
+            }
+        }
 
         // Initialize on load
         document.addEventListener('DOMContentLoaded', init);

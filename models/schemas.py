@@ -1,5 +1,5 @@
 """
-Data Models - Pydantic schemas for course structure
+Data Models - Pydantic schemas for course structure and API requests
 """
 
 from pydantic import BaseModel, Field
@@ -20,3 +20,19 @@ class CourseLMS(BaseModel):
     """The final, structured output for the entire course, ready for an LMS."""
     course_title: str = Field(description="The overall title of the course")
     modules: List[Module] = Field(description="A list of all modules in the course")
+
+# API Request Models
+class ChatRequest(BaseModel):
+    """Request model for chat endpoint."""
+    message: str = Field(description="The user's message/query")
+    language: str = Field(default="en-IN", description="Response language code")
+
+class TextQuery(BaseModel):
+    """Legacy text query model for compatibility."""
+    query: str = Field(description="The user's query")
+    language: str = Field(default="en-IN", description="Response language code")
+
+class TTSRequest(BaseModel):
+    """Request model for text-to-speech generation."""
+    text: str = Field(description="Text to convert to speech")
+    language: str = Field(default="en-IN", description="Language for TTS")

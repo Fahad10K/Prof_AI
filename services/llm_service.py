@@ -1,8 +1,9 @@
 """
-LLM Service - Handles OpenAI language model interactions
+LLM Service - Handles OpenAI language model interactions with streaming support
 """
 
 from openai import AsyncOpenAI
+from typing import AsyncGenerator
 import config
 
 class LLMService:
@@ -55,3 +56,42 @@ class LLMService:
         except Exception as e:
             print(f"Error during LLM translation: {e}")
             return text
+    
+    async def generate_response(self, prompt: str, temperature: float = 0.7) -> str:
+        """Generate a response from the LLM."""
+        messages = [
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            response = await self.client.chat.completions.create(
+                model=config.LLM_MODEL_NAME,
+                messages=messages,
+                temperature=temperature
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"Error generating LLM response: {e}")
+            return "I apologize, but I couldn't generate a response at the moment."
+    
+    async def generate_response_stream(self, prompt: str, temperature: float = 0.7) -> AsyncGenerator[str, None]:
+        """Stream response generation from the LLM."""
+        messages = [
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            stream = await self.client.chat.completions.create(
+                model=config.LLM_MODEL_NAME,
+                messages=messages,
+                temperature=temperature,
+                stream=True
+            )
+            
+            async for chunk in stream:
+                if chunk.choices[0].delta.content is not None:
+                    yield chunk.choices[0].delta.content
+                    
+        except Exception as e:
+            print(f"Error in streaming LLM response: {e}")
+            yield "I apologize, but I couldn't generate a response at the moment."
