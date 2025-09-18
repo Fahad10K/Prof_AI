@@ -72,24 +72,46 @@ class AudioService:
     
     def _is_client_disconnected(self, websocket) -> bool:
         """Check if WebSocket client is disconnected."""
-        return not is_client_connected(websocket)
+        try:
+            if not websocket:
+                return False
+            
+            # Check if WebSocket is closed or closing
+            if hasattr(websocket, 'closed') and websocket.closed:
+                return True
+            
+            if hasattr(websocket, 'state'):
+                # WebSocket states: CONNECTING=0, OPEN=1, CLOSING=2, CLOSED=3
+                return websocket.state in [2, 3]  # CLOSING or CLOSED
+            
+            return False
+        except Exception:
+            # If we can't check the state, assume disconnected for safety
+            return True
     
     def _is_normal_disconnection(self, error_msg: str) -> bool:
         """Check if error message indicates a normal client disconnection."""
-        try:
-            # Check for normal WebSocket closure codes
-            if "1000" in str(error_msg) or "1001" in str(error_msg):
-                return True
-            
-            # Check for common disconnection phrases
-            error_msg = str(error_msg).lower()
-            disconnection_phrases = [
-                "connection closed",
-                "client disconnected", 
-                "going away",
-                "connection lost"
-            ]
-            
-            return any(phrase in error_msg for phrase in disconnection_phrases)
-        except Exception:
+        if not error_msg:
             return False
+        
+        error_msg = str(error_msg).lower()
+        
+        # Check for normal WebSocket closure codes
+        normal_codes = ["1000", "1001"]  # OK, Going Away
+        for code in normal_codes:
+            if code in error_msg:
+                return True
+        
+        # Check for common disconnection phrases
+        disconnection_phrases = [
+            "connection closed",
+            "client disconnected", 
+            "going away",
+            "connection lost"
+        ]
+        
+        for phrase in disconnection_phrases:
+            if phrase in error_msg:
+                return True
+        
+        return False

@@ -82,14 +82,49 @@ class DocumentService:
             if not final_course:
                 raise Exception("Course generation failed")
 
-            # Save course output
+            # Save course output - append to existing courses
             logging.info("STEP 5: Saving course...")
             os.makedirs(config.COURSES_DIR, exist_ok=True)
-            with open(config.OUTPUT_JSON_PATH, 'w', encoding='utf-8') as f:
-                json.dump(final_course.dict(), f, indent=4, ensure_ascii=False)
             
-            logging.info("Course generation completed successfully!")
-            return final_course.dict()
+            # Load existing courses or create new structure
+            existing_courses = []
+            next_course_id = 1
+            
+            if os.path.exists(config.OUTPUT_JSON_PATH):
+                try:
+                    with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
+                        existing_data = json.load(f)
+                    
+                    # Handle both single course and multi-course formats
+                    if isinstance(existing_data, dict) and 'course_title' in existing_data:
+                        # Single course format - convert to list
+                        existing_courses = [existing_data]
+                        next_course_id = existing_data.get('course_id', 1) + 1
+                    elif isinstance(existing_data, list):
+                        # Multi-course format
+                        existing_courses = existing_data
+                        next_course_id = max([c.get('course_id', 0) for c in existing_courses], default=0) + 1
+                        
+                except Exception as e:
+                    logging.warning(f"Could not load existing courses: {e}")
+            
+            # Assign course_id to new course
+            course_dict = final_course.dict()
+            course_dict['course_id'] = next_course_id
+            
+            # Append new course to existing courses
+            existing_courses.append(course_dict)
+            
+            # Save updated course list
+            with open(config.OUTPUT_JSON_PATH, 'w', encoding='utf-8') as f:
+                # If only one course, save as single object to match original format
+                if len(existing_courses) == 1:
+                    json.dump(existing_courses[0], f, indent=4, ensure_ascii=False)
+                else:
+                    json.dump(existing_courses, f, indent=4, ensure_ascii=False)
+            
+            logging.info(f"Course generation completed successfully! Course ID: {next_course_id}")
+            return course_dict
             
         except Exception as e:
             logging.error(f"Error processing PDFs: {e}")

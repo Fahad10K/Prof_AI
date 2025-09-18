@@ -4,25 +4,23 @@ Sarvam Service - Handles Sarvam AI integrations for translation, STT, and TTS
 
 import io
 import asyncio
+import time
+import io
 import base64
-from concurrent.futures import ThreadPoolExecutor
-from sarvamai import SarvamAI, AsyncSarvamAI, AudioOutput
+from typing import AsyncGenerator, Optional
+from sarvamai import AsyncSarvamAI, AudioOutput
 from typing import Optional
 import config
-from utils.connection_monitor import (
-    is_client_connected, 
-    is_normal_closure, 
-    log_disconnection,
-    should_continue_streaming
-)
 
 class SarvamService:
     """Service for Sarvam AI operations."""
     
     def __init__(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from sarvamai import SarvamAI
         self.executor = ThreadPoolExecutor(max_workers=6)  # Increased for parallel processing
         self.sync_client = SarvamAI(api_subscription_key=config.SARVAM_API_KEY)
-        self.async_client = AsyncSarvamAI(api_subscription_key=config.SARVAM_API_KEY)
+        self.client = AsyncSarvamAI(api_subscription_key=config.SARVAM_API_KEY)  # Match Contelligence naming
     
     def _translate_sync(self, text: str, target_language_code: str, source_language_code: str) -> str:
         """Synchronously translate text using Sarvam AI."""
@@ -110,141 +108,203 @@ class SarvamService:
             return io.BytesIO()
     
     async def generate_audio_ultra_fast(self, text: str, language_code: str, speaker: str) -> io.BytesIO:
-        """Ultra-fast audio generation with aggressive truncation for minimal latency."""
+        """Ultra-fast audio generation with aggressive optimization for minimal latency."""
         try:
             print(f"⚡ Ultra-fast generation for {len(text)} chars")
             
-            # Aggressive truncation for speed
-            if len(text) > 3000:
-                text = text[:2800] + "."
-                print(f"   Truncated to 2800 chars for ultra speed")
+            # EXTREME truncation for speed
+            if len(text) > 1000:
+                text = text[:900] + "."
+                print(f"   Truncated to 900 chars for MAXIMUM speed")
             
             # Minimal cleaning for maximum speed
             import re
             text = re.sub(r'[*#_`\[\]{}\\]', ' ', text)
             text = re.sub(r'\s+', ' ', text).strip()
             
-            # Single request only for maximum speed
-            return await self._generate_audio_single(text, language_code, speaker)
+            # Use fastest possible generation with timeout
+            return await asyncio.wait_for(
+                self._generate_audio_single(text, language_code, speaker),
+                timeout=5.0  # 5 second max timeout
+            )
             
+        except asyncio.TimeoutError:
+            print(f"❌ Ultra-fast TTS timeout after 5s")
+            return io.BytesIO()
         except Exception as e:
             print(f"❌ Ultra-fast TTS error: {e}")
             return io.BytesIO()
     
     async def stream_audio_generation(self, text: str, language_code: str, speaker: str, websocket=None):
-        """Stream audio chunks in real-time for sub-300ms latency - OPTIMIZED VERSION."""
+        """Direct Sarvam TTS streaming like Contelligence - ZERO buffering for maximum speed."""
         try:
-            print(f"🚀 REAL-TIME streaming for {len(text)} chars")
+            print(f"⚡ DIRECT Sarvam streaming for {len(text)} chars")
             
-            # Check if client is still connected before starting
-            if websocket and self._is_client_disconnected(websocket):
-                print("   🔌 Client already disconnected - stopping generation")
-                return
-            
-            # Aggressive text cleaning for maximum speed
-            cleaned_text = self._clean_text_for_ultra_fast_streaming(text)
-            
-            # Use VERY small chunks for immediate first audio
-            chunk_size = 800  # Much smaller for faster first chunk
-            
-            if len(cleaned_text) <= chunk_size:
-                # Single chunk - direct streaming from Sarvam
-                print("   Single chunk - direct streaming")
-                async for chunk in self._stream_audio_direct(cleaned_text, language_code, speaker, websocket):
-                    yield chunk
-            else:
-                # Multi-chunk with immediate first chunk delivery
-                print("   Multi-chunk streaming with immediate delivery")
-                async for chunk in self._stream_audio_immediate(cleaned_text, language_code, speaker, chunk_size, websocket):
-                    yield chunk
-                    
+            # Use Sarvam's direct TTS streaming like Contelligence
+            async with self.client.text_to_speech_streaming.connect(model="bulbul:v2") as tts_ws:
+                print("   🔗 Connected to Sarvam TTS streaming")
+                
+                # Configure TTS stream
+                await tts_ws.configure(
+                    target_language_code=language_code,
+                    speaker=speaker,
+                    output_audio_codec="mp3"
+                )
+                
+                print("   🎯 Starting direct TTS conversion")
+                # Send text to TTS - this starts streaming immediately
+                await tts_ws.convert(text)
+                
+                chunk_count = 0
+                first_chunk_time = None
+                
+                # Forward TTS chunks directly to client (Contelligence pattern)
+                async for tts_resp in tts_ws:
+                    if hasattr(tts_resp, 'data') and hasattr(tts_resp.data, 'audio'):
+                        chunk_count += 1
+                        if first_chunk_time is None:
+                            first_chunk_time = time.time()
+                        
+                        audio_chunk_b64 = tts_resp.data.audio
+                        # Convert base64 to bytes for yielding
+                        import base64
+                        audio_bytes = base64.b64decode(audio_chunk_b64)
+                        
+                        # Break large chunks into smaller pieces to prevent WebSocket disconnections
+                        max_chunk_size = 4096  # 4KB max for stability
+                        if len(audio_bytes) > max_chunk_size:
+                            # Split into smaller chunks
+                            for i in range(0, len(audio_bytes), max_chunk_size):
+                                small_chunk = audio_bytes[i:i + max_chunk_size]
+                                chunk_count += 1
+                                
+                                # Debug: Show chunk content preview
+                                try:
+                                    chunk_preview = str(small_chunk[:50]) if small_chunk else "[empty]"
+                                    print(f"   ⚡ Split chunk {chunk_count}: {len(small_chunk)} bytes - Preview: {chunk_preview}...")
+                                except:
+                                    print(f"   ⚡ Split chunk {chunk_count}: {len(small_chunk)} bytes - [binary data]")
+                                
+                                yield small_chunk
+                                await asyncio.sleep(0.001)  # Small delay between chunks
+                        else:
+                            # Normal sized chunk
+                            # Debug: Show first 50 chars of chunk content
+                            try:
+                                chunk_preview = str(audio_bytes[:50]) if audio_bytes else "[empty]"
+                                print(f"   ⚡ Direct chunk {chunk_count}: {len(audio_bytes)} bytes - Preview: {chunk_preview}...")
+                            except:
+                                print(f"   ⚡ Direct chunk {chunk_count}: {len(audio_bytes)} bytes - [binary data]")
+                            
+                            yield audio_bytes
+                
+                # Final flush like Contelligence
+                await tts_ws.flush()
+                print(f"   ✅ Direct streaming complete: {chunk_count} chunks")
+                
         except Exception as e:
-            error_msg = str(e)
-            if self._is_normal_disconnection(error_msg):
-                print(f"   🔌 Client disconnected during streaming: {e}")
-                print(f"   ⚠️ Stopping audio generation - client no longer connected")
+            print(f"❌ Direct streaming failed: {e}")
+            # Simple fallback without complex buffering
+            try:
+                print("   ⚡ Simple fallback generation")
+                audio_buffer = await self.generate_audio_ultra_fast(text, language_code, speaker)
+                if audio_buffer and audio_buffer.getbuffer().nbytes > 0:
+                    yield audio_buffer.getvalue()
+            except Exception as fallback_error:
+                print(f"   ❌ Fallback failed: {fallback_error}")
                 return
-            else:
-                print(f"❌ Streaming error: {e}")
-                # Only fallback for actual errors, not disconnections
-                if websocket and not self._is_client_disconnected(websocket):
-                    try:
-                        print("   Falling back to ultra-fast generation")
-                        audio_buffer = await self.generate_audio_ultra_fast(text, language_code, speaker)
-                        if audio_buffer and audio_buffer.getbuffer().nbytes > 0:
-                            yield audio_buffer.getvalue()
-                    except Exception as fallback_error:
-                        print(f"   Fallback also failed: {fallback_error}")
-                        return
     
     async def _stream_audio_direct(self, text: str, language_code: str, speaker: str, websocket=None):
-        """Direct streaming from Sarvam with immediate chunk delivery."""
+        """Direct streaming from Sarvam with immediate chunk delivery and browser-compatible chunking."""
         try:
             print(f"   🎯 Direct streaming: {len(text)} chars")
-            
-            # Check if client is still connected before starting
-            if websocket and self._is_client_disconnected(websocket):
-                print("   🔌 Client disconnected before streaming - stopping")
-                return
             
             # Import AudioOutput here to avoid import issues
             from sarvamai import AudioOutput
             
-            async with self.async_client.text_to_speech_streaming.connect(model="bulbul:v2") as ws:
+            async with self.client.text_to_speech_streaming.connect(model="bulbul:v2") as ws:
                 # Configure immediately
                 await ws.configure(target_language_code=language_code, speaker=speaker)
                 
                 # Start conversion immediately
                 await ws.convert(text)
                 
-                # Stream chunks as they arrive with connection checking
+                # Stream chunks with smaller sizing for stability
                 chunk_count = 0
-                async for message in ws:
-                    # Check connection before yielding each chunk
-                    if websocket and self._is_client_disconnected(websocket):
-                        print(f"   🔌 Client disconnected after {chunk_count} chunks - stopping")
-                        return
-                    
-                    if isinstance(message, AudioOutput) and message.data and message.data.audio:
-                        chunk_count += 1
-                        audio_chunk = base64.b64decode(message.data.audio)
-                        if audio_chunk and len(audio_chunk) > 0:
-                            print(f"   ⚡ Chunk {chunk_count}: {len(audio_chunk)} bytes")
-                            yield audio_chunk
+                audio_buffer = b''
+                max_chunk_size = 4096  # 4KB chunks for WebSocket stability
                 
-                # Final flush only if client is still connected
-                if not websocket or not self._is_client_disconnected(websocket):
-                    await ws.flush()
-                    print(f"   ✅ Direct streaming complete: {chunk_count} chunks")
-                else:
-                    print(f"   🔌 Client disconnected during flush - stopping at {chunk_count} chunks")
+                async for message in ws:
+                    if isinstance(message, AudioOutput) and message.data and message.data.audio:
+                        large_chunk = base64.b64decode(message.data.audio)
+                        if large_chunk and len(large_chunk) > 0:
+                            audio_buffer += large_chunk
+                            
+                            # Break large chunks into browser-compatible sizes
+                            while len(audio_buffer) >= max_chunk_size:
+                                chunk_count += 1
+                                small_chunk = audio_buffer[:max_chunk_size]
+                                audio_buffer = audio_buffer[max_chunk_size:]
+                                
+                                # Debug: Show chunk content preview
+                                try:
+                                    chunk_preview = str(small_chunk[:50]) if small_chunk else "[empty]"
+                                    print(f"   ⚡ Chunk {chunk_count}: {len(small_chunk)} bytes - Preview: {chunk_preview}...")
+                                except:
+                                    print(f"   ⚡ Chunk {chunk_count}: {len(small_chunk)} bytes - [binary data]")
+                                yield small_chunk
+                                
+                                # Minimal delay for maximum speed
+                                await asyncio.sleep(0.001)  # 1ms delay for ultra-fast streaming
+                
+                # Send remaining audio buffer
+                if audio_buffer:
+                    chunk_count += 1
+                    # Debug: Show final chunk preview
+                    try:
+                        chunk_preview = str(audio_buffer[:50]) if audio_buffer else "[empty]"
+                        print(f"   ⚡ Final chunk {chunk_count}: {len(audio_buffer)} bytes - Preview: {chunk_preview}...")
+                    except:
+                        print(f"   ⚡ Final chunk {chunk_count}: {len(audio_buffer)} bytes - [binary data]")
+                    yield audio_buffer
+                
+                # Always flush to complete the streaming
+                await ws.flush()
+                print(f"   ✅ Direct streaming complete: {chunk_count} browser-compatible chunks")
                             
         except Exception as e:
             error_msg = str(e)
             if self._is_normal_disconnection(error_msg):
                 print(f"   🔌 Client disconnected during streaming: {e}")
-                print(f"   ⚠️ Stopping audio generation - client no longer connected")
-                return  # Stop generation if client disconnected
+                print(f"   ⚠️ Normal disconnection - continuing with fallback")
+                # Continue with fallback instead of stopping
             else:
                 print(f"   ❌ Direct stream error: {e}")
-                # Only fallback if client is still connected
-                if not websocket or not self._is_client_disconnected(websocket):
-                    try:
-                        print(f"   🔄 Fallback to fast generation")
-                        audio_buffer = await self._generate_audio_single(text, language_code, speaker)
-                        if audio_buffer and audio_buffer.getbuffer().nbytes > 0:
-                            yield audio_buffer.getvalue()
-                    except Exception as fallback_error:
-                        print(f"   ❌ Fallback failed: {fallback_error}")
-                        return
+            
+            # Fast fallback with immediate small chunks
+            try:
+                print(f"   ⚡ ULTRA-FAST fallback generation")
+                audio_buffer = await self.generate_audio_ultra_fast(text, language_code, speaker)
+                if audio_buffer and audio_buffer.getbuffer().nbytes > 0:
+                    # Break into small chunks for immediate streaming
+                    audio_bytes = audio_buffer.getvalue()
+                    chunk_size = 4096  # 4KB chunks
+                    chunk_count = 0
+                    
+                    for i in range(0, len(audio_bytes), chunk_size):
+                        chunk_count += 1
+                        chunk = audio_bytes[i:i + chunk_size]
+                        print(f"   ⚡ Fallback chunk {chunk_count}: {len(chunk)} bytes")
+                        yield chunk
+                        await asyncio.sleep(0.01)  # 10ms delay between chunks
+            except Exception as fallback_error:
+                print(f"   ❌ Fallback failed: {fallback_error}")
+                return
     
     async def _stream_audio_immediate(self, text: str, language_code: str, speaker: str, chunk_size: int, websocket=None):
         """Stream audio with immediate first chunk delivery - MAXIMUM SPEED."""
         try:
-            # Check if client is still connected before starting
-            if websocket and self._is_client_disconnected(websocket):
-                print("   🔌 Client disconnected before immediate streaming - stopping")
-                return
+            # Allow streaming to continue - only stop on actual errors
             
             # Split into very small chunks for immediate delivery
             chunks = self._split_text_for_immediate_streaming(text, chunk_size)
@@ -259,49 +319,33 @@ class SarvamService:
             
             first_chunk_delivered = False
             async for audio_chunk in self._stream_audio_direct(first_chunk, language_code, speaker, websocket):
-                # Check connection before yielding
-                if websocket and self._is_client_disconnected(websocket):
-                    print("   🔌 Client disconnected during first chunk - stopping")
-                    return
-                
                 if not first_chunk_delivered:
                     print(f"   🚀 FIRST AUDIO DELIVERED!")
                     first_chunk_delivered = True
                 yield audio_chunk
             
-            # REMAINING CHUNKS - PARALLEL PROCESSING (only if client still connected)
-            if len(chunks) > 1 and (not websocket or not self._is_client_disconnected(websocket)):
-                print(f"   🔄 Processing {len(chunks)-1} remaining chunks in parallel")
+            # REMAINING CHUNKS - PARALLEL PROCESSING WITH ORDERED QUEUE
+            if len(chunks) > 1:
+
                 
-                # Process remaining chunks in parallel
+                print(f"   �  Processing {len(chunks)-1} remaining chunks sequentially")
+                
+                # Process remaining chunks sequentially to allow immediate stopping on disconnection
                 remaining_chunks = chunks[1:]
                 
-                # Create parallel tasks for remaining chunks
-                tasks = []
                 for i, chunk in enumerate(remaining_chunks):
-                    task = asyncio.create_task(
-                        self._generate_chunk_fast(chunk, language_code, speaker, i+2)
-                    )
-                    tasks.append(task)
-                
-                # Yield results as they complete (order doesn't matter for audio streaming)
-                for task in asyncio.as_completed(tasks):
-                    # Check connection before processing each completed task
-                    if websocket and self._is_client_disconnected(websocket):
-                        print("   🔌 Client disconnected during parallel processing - stopping")
-                        # Cancel remaining tasks
-                        for remaining_task in tasks:
-                            if not remaining_task.done():
-                                remaining_task.cancel()
-                        return
+                    chunk_index = i + 2  # Chunk numbering starts from 2
                     
-                    try:
-                        chunk_audio = await task
-                        if chunk_audio and len(chunk_audio) > 0:
-                            yield chunk_audio
-                    except Exception as e:
-                        print(f"   ⚠️ Parallel chunk failed: {e}")
-                        continue
+
+                    
+                    print(f"   🔄 Processing chunk {chunk_index}/{len(chunks)}: {len(chunk)} chars")
+                    
+                    # Process chunk and yield results immediately
+                    async for audio_chunk in self._stream_audio_direct(chunk, language_code, speaker, websocket):
+
+                        if audio_chunk and len(audio_chunk) > 0:
+                            yield audio_chunk
+
                         
             print(f"   ✅ Immediate streaming complete")
                             
@@ -430,18 +474,27 @@ class SarvamService:
         
         return chunks
     
-    async def _generate_chunk_fast(self, text: str, language_code: str, speaker: str, chunk_num: int) -> bytes:
-        """Generate audio chunk as fast as possible."""
+    async def _generate_chunk_with_streaming(self, text: str, language_code: str, speaker: str, chunk_num: int, websocket=None) -> list:
+        """Generate audio chunk with streaming and collect all pieces - CONTINUOUS STREAMING."""
         try:
-            print(f"   🔄 Chunk {chunk_num}: {len(text)} chars")
-            audio_buffer = await self._generate_audio_single(text, language_code, speaker)
-            audio_bytes = audio_buffer.getvalue()
-            if audio_bytes:
-                print(f"   ✅ Chunk {chunk_num}: {len(audio_bytes)} bytes ready")
-            return audio_bytes
+            print(f"   🔄 Processing chunk {chunk_num}: {len(text)} chars")
+            audio_chunks = []
+            
+            # Collect all audio chunks from this text chunk - NO INTERRUPTION
+            async for audio_chunk in self._stream_audio_direct(text, language_code, speaker, websocket):
+                if audio_chunk and len(audio_chunk) > 0:
+                    audio_chunks.append(audio_chunk)
+            
+            total_bytes = sum(len(chunk) for chunk in audio_chunks)
+            if total_bytes > 0:
+                print(f"   ✅ Chunk {chunk_num}: {len(audio_chunks)} pieces, {total_bytes} bytes ready")
+            else:
+                print(f"   ⚠️ Chunk {chunk_num}: No audio generated")
+            return audio_chunks
+            
         except Exception as e:
             print(f"   ❌ Chunk {chunk_num} failed: {e}")
-            return b''
+            return []
     
     def _clean_text_for_tts_fast(self, text: str) -> str:
         """Fast text cleaning optimized for speed and TTS quality."""
@@ -583,7 +636,7 @@ class SarvamService:
         """Generate audio for text with optimized streaming for speed."""
         try:
             # Reduced logging for speed
-            async with self.async_client.text_to_speech_streaming.connect(model="bulbul:v2") as ws:
+            async with self.client.text_to_speech_streaming.connect(model="bulbul:v2") as ws:
                 await ws.configure(target_language_code=language_code, speaker=speaker)
                 await ws.convert(text)
                 await ws.flush()
@@ -722,27 +775,49 @@ class SarvamService:
     
     def _is_client_disconnected(self, websocket) -> bool:
         """Check if WebSocket client is disconnected."""
-        return not is_client_connected(websocket)
+        try:
+            if not websocket:
+                return False
+            
+            # Check if WebSocket is closed or closing
+            if hasattr(websocket, 'closed') and websocket.closed:
+                return True
+            
+            if hasattr(websocket, 'state'):
+                # WebSocket states: CONNECTING=0, OPEN=1, CLOSING=2, CLOSED=3
+                return websocket.state in [2, 3]  # CLOSING or CLOSED
+            
+            return False
+        except Exception:
+            # If we can't check the state, assume disconnected for safety
+            return True
     
     def _is_normal_disconnection(self, error_msg: str) -> bool:
         """Check if error message indicates a normal client disconnection."""
-        try:
-            # Try to create an exception from the error message to use our utility
-            if "1000" in str(error_msg) or "1001" in str(error_msg):
-                return True
-            
-            # Check for common disconnection phrases
-            error_msg = str(error_msg).lower()
-            disconnection_phrases = [
-                "connection closed",
-                "client disconnected", 
-                "going away",
-                "connection lost"
-            ]
-            
-            return any(phrase in error_msg for phrase in disconnection_phrases)
-        except Exception:
+        if not error_msg:
             return False
+        
+        error_msg = str(error_msg).lower()
+        
+        # Check for normal WebSocket closure codes
+        normal_codes = ["1000", "1001"]  # OK, Going Away
+        for code in normal_codes:
+            if code in error_msg:
+                return True
+        
+        # Check for common disconnection phrases
+        disconnection_phrases = [
+            "connection closed",
+            "client disconnected",
+            "going away",
+            "connection lost"
+        ]
+        
+        for phrase in disconnection_phrases:
+            if phrase in error_msg:
+                return True
+        
+        return False
 
     def _split_into_sentences(self, text: str) -> list:
         """Split text into sentences preserving punctuation."""

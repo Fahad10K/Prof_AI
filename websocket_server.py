@@ -18,18 +18,6 @@ from services.audio_service import AudioService
 from services.teaching_service import TeachingService
 import config
 
-# Import connection monitoring utilities
-from utils.connection_monitor import (
-    is_normal_closure,
-    is_abnormal_disconnection,
-    get_disconnection_emoji,
-    is_client_connected,
-    log_disconnection,
-    send_chunk_safely,
-    validate_connection_before_operation,
-    ConnectionStateMonitor
-)
-
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -41,7 +29,50 @@ def log(*args):
     """Enhanced logging with timestamp"""
     print(f"[{ts()}][WebSocket]", *args, flush=True)
 
-# Connection monitoring utilities are now imported from utils.connection_monitor
+def is_normal_closure(exception) -> bool:
+    """Check if a WebSocket exception represents a normal closure (codes 1000, 1001)."""
+    if isinstance(exception, ConnectionClosedOK):
+        return True
+    if isinstance(exception, ConnectionClosed):
+        # Check for normal closure codes: 1000 (OK) and 1001 (going away)
+        return exception.code in (1000, 1001)
+    return False
+
+def get_disconnection_emoji(exception) -> str:
+    """Get appropriate emoji for disconnection type."""
+    if is_normal_closure(exception):
+        return "🔌"  # Normal disconnection
+    else:
+        return "❌"  # Error disconnection
+
+def log_disconnection(client_id: str, exception, context: str = ""):
+    """Log disconnection with appropriate emoji and message."""
+    emoji = get_disconnection_emoji(exception)
+    if is_normal_closure(exception):
+        if hasattr(exception, 'code'):
+            log(f"{emoji} Client {client_id} disconnected normally (code {exception.code}) {context}")
+        else:
+            log(f"{emoji} Client {client_id} disconnected normally {context}")
+    else:
+        if hasattr(exception, 'code'):
+            log(f"{emoji} Client {client_id} disconnected with error (code {exception.code}) {context}")
+        else:
+            log(f"{emoji} Client {client_id} disconnected with error: {exception} {context}")
+
+def is_client_connected(websocket) -> bool:
+    """Check if WebSocket client is still connected."""
+    if not websocket:
+        return False
+    
+    # Check if WebSocket is closed or closing
+    if hasattr(websocket, 'closed') and websocket.closed:
+        return False
+    
+    if hasattr(websocket, 'state'):
+        # WebSocket states: CONNECTING=0, OPEN=1, CLOSING=2, CLOSED=3
+        return websocket.state == 1  # Only OPEN state is considered connected
+    
+    return True
 
 class ProfAIWebSocketWrapper:
     """
@@ -234,16 +265,14 @@ class ProfAIAgent:
                     })
                 except Exception as e:
                     log(f"❌ Error processing message for {self.client_id}: {e}")
-                    # Only try to send error message if client is still connected
-                    if is_client_connected(self.websocket.websocket):
-                        try:
-                            await self.websocket.send({
-                                "type": "error",
-                                "error": f"Message processing error: {str(e)}"
-                            })
-                        except ConnectionClosed as conn_e:
-                            log_disconnection(self.client_id, conn_e, "while sending error message")
-                            break
+                    try:
+                        await self.websocket.send({
+                            "type": "error",
+                            "error": f"Message processing error: {str(e)}"
+                        })
+                    except ConnectionClosed as conn_e:
+                        log_disconnection(self.client_id, conn_e, "while sending error message")
+                        break
                     
         except Exception as e:
             log(f"Fatal error in message processing for {self.client_id}: {e}")
@@ -263,12 +292,24 @@ class ProfAIAgent:
         request_start_time = time.time()
         
         try:
-            # Check service availability
-            if not self.services_available.get("chat", False) or not self.services_available.get("audio", False):
+            # Enhanced service availability check
+            if not self.services_available.get("chat", False):
+                await self.websocket.send({
+                    "type": "error", 
+                    "error": "Chat service not available - please refresh connection"
+                })
+                return
+                
+            if not self.services_available.get("audio", False):
                 await self.websocket.send({
                     "type": "error",
-                    "error": "Chat or audio service not available"
+                    "error": "Audio service not available - please refresh connection"  
                 })
+                return
+                
+            # Validate connection state before processing
+            if not is_client_connected(self.websocket.websocket):
+                log(f"Client {self.client_id} disconnected before processing chat request")
                 return
             
             query = data.get("message")
@@ -287,22 +328,34 @@ class ProfAIAgent:
             await self.websocket.send({
                 "type": "processing_started",
                 "message": "Generating response...",
-                "request_id": data.get("request_id", "")
+                "request_id": data.get("request_id", ""),
+                "timestamp": time.time()
             })
             
-            # Get text response with timeout
+            # Get text response with enhanced error handling
+            response_text = ""
             try:
+                # Check connection before making LLM call
+                if not is_client_connected(self.websocket.websocket):
+                    log(f"Client {self.client_id} disconnected before LLM call")
+                    return
+                
                 response_data = await asyncio.wait_for(
                     self.chat_service.ask_question(query, language),
-                    timeout=8.0  # 8 second timeout for LLM
+                    timeout=10.0  # Increased timeout for better reliability
                 )
                 response_text = response_data.get('answer') or response_data.get('response', '')
                 
                 if not response_text:
                     await self.websocket.send({
                         "type": "error",
-                        "error": "No response generated"
+                        "error": "No response generated from chat service"
                     })
+                    return
+                
+                # Check connection before sending text response
+                if not is_client_connected(self.websocket.websocket):
+                    log(f"Client {self.client_id} disconnected before sending text response")
                     return
                 
                 # Send text response immediately
@@ -310,23 +363,31 @@ class ProfAIAgent:
                     "type": "text_response",
                     "text": response_text,
                     "metadata": response_data,
-                    "request_id": data.get("request_id", "")
+                    "request_id": data.get("request_id", ""),
+                    "timestamp": time.time()
                 })
                 
                 log(f"Text response sent: {len(response_text)} chars")
                 
             except asyncio.TimeoutError:
-                await self.websocket.send({
-                    "type": "error",
-                    "error": "Response generation timeout"
-                })
+                log(f"Chat service timeout for client {self.client_id}")
+                try:
+                    await self.websocket.send({
+                        "type": "error",
+                        "error": "Response generation timeout - please try again"
+                    })
+                except ConnectionClosed:
+                    log(f"Client {self.client_id} disconnected during timeout handling")
                 return
             except Exception as e:
-                log(f"Chat service error: {e}")
-                await self.websocket.send({
-                    "type": "error",
-                    "error": f"Chat service failed: {str(e)}"
-                })
+                log(f"Chat service error for client {self.client_id}: {e}")
+                try:
+                    await self.websocket.send({
+                        "type": "error", 
+                        "error": f"Chat service failed: {str(e)}"
+                    })
+                except ConnectionClosed:
+                    log(f"Client {self.client_id} disconnected during error handling")
                 return
             
             # Generate audio with REAL-TIME streaming
@@ -336,7 +397,7 @@ class ProfAIAgent:
             })
             
             try:
-                # OPTIMIZED streaming for sub-300ms latency
+                # OPTIMIZED streaming for sub-300ms latency with connection stability
                 audio_start_time = time.time()
                 chunk_count = 0
                 total_audio_size = 0
@@ -344,21 +405,26 @@ class ProfAIAgent:
                 
                 log(f"🚀 Starting REAL-TIME audio streaming for: {response_text[:50]}...")
                 
+                # Check connection before streaming
+                if not self._is_websocket_connected():
+                    log("⚠️ WebSocket connection closed before audio streaming")
+                    return
+                
                 async for audio_chunk in self.audio_service.stream_audio_from_text(response_text, language, self.websocket):
-                    # Check connection state before processing each chunk
-                    if not is_client_connected(self.websocket.websocket):
-                        log(f"🔌 Client {self.client_id} disconnected during streaming - stopping generation")
-                        break
-                        
                     if audio_chunk and len(audio_chunk) > 0:
                         chunk_count += 1
                         total_audio_size += len(audio_chunk)
+                        
+                        # Check connection stability before each chunk
+                        if not self._is_websocket_connected():
+                            log(f"⚠️ Connection closed during streaming at chunk {chunk_count}")
+                            break
                         
                         # Convert to base64 for JSON transmission
                         import base64
                         audio_base64 = base64.b64encode(audio_chunk).decode('utf-8')
                         
-                        # Send chunk immediately with connection validation
+                        # Send chunk with connection check
                         try:
                             await self.websocket.send({
                                 "type": "audio_chunk",
@@ -368,16 +434,14 @@ class ProfAIAgent:
                                 "is_first_chunk": not first_chunk_sent,
                                 "request_id": data.get("request_id", "")
                             })
-                        except ConnectionClosed as e:
-                            log_disconnection(self.client_id, e, "while sending audio chunk")
-                            if is_normal_closure(e):
-                                log(f"🔌 Client disconnected normally - stopping audio generation")
+                        except Exception as send_error:
+                            log(f"⚠️ Failed to send audio chunk {chunk_count}: {send_error}")
                             break
                         
                         # Log first chunk latency (CRITICAL METRIC)
                         if not first_chunk_sent:
                             first_audio_latency = (time.time() - audio_start_time) * 1000
-                            log(f"🎯 FIRST AUDIO CHUNK delivered in {first_audio_latency:.0f}ms")
+                            log(f"🎯 FIRST CHAT AUDIO CHUNK delivered in {first_audio_latency:.0f}ms")
                             
                             if first_audio_latency <= 300:
                                 log(f"🎉 TARGET ACHIEVED! Sub-300ms latency: {first_audio_latency:.0f}ms")
@@ -388,25 +452,22 @@ class ProfAIAgent:
                             
                             first_chunk_sent = True
                         else:
-                            # Log subsequent chunks
-                            chunk_time = (time.time() - audio_start_time) * 1000
-                            log(f"   Chunk {chunk_count}: {len(audio_chunk)} bytes at {chunk_time:.0f}ms")
+                            # Log subsequent chunks with less verbosity for performance
+                            if chunk_count % 5 == 0:  # Log every 5th chunk to reduce overhead
+                                chunk_time = (time.time() - audio_start_time) * 1000
+                                log(f"   Chunk {chunk_count}: {len(audio_chunk)} bytes at {chunk_time:.0f}ms")
+                        
+                        # Optimized delay for smooth browser streaming (reduced from 1ms)
+                        await asyncio.sleep(0.02)  # 20ms delay for stable playback chunks
                 
-                # Send completion message only if client is still connected
-                if is_client_connected(self.websocket.websocket):
-                    try:
-                        await self.websocket.send({
-                            "type": "audio_generation_complete",
-                            "total_chunks": chunk_count,
-                            "total_size": total_audio_size,
-                            "first_chunk_latency": (time.time() - audio_start_time) * 1000 if first_chunk_sent else 0,
-                            "request_id": data.get("request_id", "")
-                        })
-                    except ConnectionClosed as e:
-                        log_disconnection(self.client_id, e, "while sending completion message")
-                        # Don't treat as error if it's a normal closure
-                        if not is_normal_closure(e):
-                            raise
+                # Send completion message
+                await self.websocket.send({
+                    "type": "audio_generation_complete",
+                    "total_chunks": chunk_count,
+                    "total_size": total_audio_size,
+                    "first_chunk_latency": (time.time() - audio_start_time) * 1000 if first_chunk_sent else 0,
+                    "request_id": data.get("request_id", "")
+                })
                 
                 audio_total_time = (time.time() - audio_start_time) * 1000
                 log(f"🏁 Audio streaming complete: {chunk_count} chunks, {total_audio_size} bytes in {audio_total_time:.0f}ms")
@@ -414,13 +475,11 @@ class ProfAIAgent:
             except ConnectionClosed as e:
                 log_disconnection(self.client_id, e, "during audio streaming")
                 if is_normal_closure(e):
-                    log(f"🔌 Client disconnected - stopping audio generation gracefully")
+                    log(f"🔌 Client disconnected normally - audio streaming completed")
                     # Don't count as error for normal disconnections
-                    return
                 else:
                     log(f"❌ Audio streaming interrupted by connection error")
                     self.conversation_metrics["errors"] += 1
-                    raise
             except Exception as e:
                 log(f"❌ Audio generation error: {e}")
                 self.conversation_metrics["errors"] += 1
@@ -495,9 +554,9 @@ class ProfAIAgent:
                     })
                     return
                 
-                # Load course data with timeout protection
+                # Load course data with timeout protection - pass course_id for proper loading
                 course_data = await asyncio.wait_for(
-                    self._load_course_data_async(),
+                    self._load_course_data_async(course_id),
                     timeout=3.0  # 3 second timeout for file loading
                 )
                 
@@ -620,9 +679,13 @@ class ProfAIAgent:
             })
             
             try:
+                # OPTIMIZED streaming for sub-300ms latency (consistent with chat_with_audio)
                 audio_start_time = time.time()
                 chunk_count = 0
                 total_audio_size = 0
+                first_chunk_sent = False
+                
+                log(f"🚀 Starting REAL-TIME class audio streaming for: {teaching_content[:50]}...")
                 
                 async for audio_chunk in self.audio_service.stream_audio_from_text(teaching_content, language, self.websocket):
                     if audio_chunk and len(audio_chunk) > 0:
@@ -633,38 +696,65 @@ class ProfAIAgent:
                         import base64
                         audio_base64 = base64.b64encode(audio_chunk).decode('utf-8')
                         
+                        # Send chunk immediately
                         await self.websocket.send({
                             "type": "audio_chunk",
                             "chunk_id": chunk_count,
                             "audio_data": audio_base64,
                             "size": len(audio_chunk),
-                            "is_first_chunk": chunk_count == 1,
+                            "is_first_chunk": not first_chunk_sent,
                             "request_id": data.get("request_id", "")
                         })
                         
-                        # Log first chunk latency
-                        if chunk_count == 1:
+                        # Log first chunk latency (CRITICAL METRIC - consistent with chat)
+                        if not first_chunk_sent:
                             first_audio_latency = (time.time() - audio_start_time) * 1000
-                            log(f"🎯 First class audio chunk delivered in {first_audio_latency:.0f}ms")
+                            log(f"🎯 FIRST CLASS AUDIO CHUNK delivered in {first_audio_latency:.0f}ms")
+                            
+                            if first_audio_latency <= 300:
+                                log(f"🎉 TARGET ACHIEVED! Sub-300ms latency: {first_audio_latency:.0f}ms")
+                            elif first_audio_latency <= 900:
+                                log(f"✅ GOOD latency: {first_audio_latency:.0f}ms (under 900ms target)")
+                            else:
+                                log(f"⚠️ HIGH latency: {first_audio_latency:.0f}ms (needs optimization)")
+                            
+                            first_chunk_sent = True
+                        else:
+                            # Log subsequent chunks
+                            chunk_time = (time.time() - audio_start_time) * 1000
+                            log(f"   Chunk {chunk_count}: {len(audio_chunk)} bytes at {chunk_time:.0f}ms")
                 
-                # Send completion message
+                # Send completion message (consistent completion type)
                 await self.websocket.send({
-                    "type": "class_complete",
+                    "type": "audio_generation_complete",
                     "total_chunks": chunk_count,
                     "total_size": total_audio_size,
+                    "first_chunk_latency": (time.time() - audio_start_time) * 1000 if first_chunk_sent else 0,
                     "message": "Class audio ready to play!",
                     "request_id": data.get("request_id", "")
                 })
                 
                 audio_total_time = (time.time() - audio_start_time) * 1000
-                log(f"🏁 Class audio complete: {chunk_count} chunks, {total_audio_size} bytes in {audio_total_time:.0f}ms")
+                log(f"🏁 Class audio streaming complete: {chunk_count} chunks, {total_audio_size} bytes in {audio_total_time:.0f}ms")
                 
+            except ConnectionClosed as e:
+                log_disconnection(self.client_id, e, "during class audio streaming")
+                if is_normal_closure(e):
+                    log(f"🔌 Client disconnected normally - class audio streaming completed")
+                else:
+                    log(f"❌ Class audio streaming interrupted by connection error")
+                    self.conversation_metrics["errors"] += 1
             except Exception as e:
-                log(f"Class audio generation error: {e}")
-                await self.websocket.send({
-                    "type": "error",
-                    "error": f"Class audio generation failed: {str(e)}"
-                })
+                log(f"❌ Class audio generation error: {e}")
+                self.conversation_metrics["errors"] += 1
+                try:
+                    await self.websocket.send({
+                        "type": "error",
+                        "error": f"Class audio generation failed: {str(e)}"
+                    })
+                except ConnectionClosed as conn_e:
+                    log_disconnection(self.client_id, conn_e, "while sending error message")
+                    return
             
             # Update metrics
             total_time = time.time() - request_start_time
@@ -685,35 +775,6 @@ class ProfAIAgent:
                 "type": "error",
                 "error": f"Class processing failed: {str(e)}"
             })
-
-    async def _load_course_data_async(self):
-        """Load course data asynchronously to avoid blocking."""
-        import json
-        loop = asyncio.get_event_loop()
-        
-        def load_file():
-            with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        
-        return await loop.run_in_executor(None, load_file)
-
-    def _create_simple_teaching_content(self, module_title: str, sub_topic_title: str, raw_content: str) -> str:
-        """Create simple teaching content as fallback when LLM is unavailable or times out."""
-        # Extract first few sentences from raw content
-        sentences = raw_content.split('. ')
-        intro_content = '. '.join(sentences[:3]) + '.' if len(sentences) >= 3 else raw_content[:500]
-        
-        return f"""Welcome to today's lesson on {sub_topic_title} from the module {module_title}.
-
-Let me explain this important topic to you.
-
-{intro_content}
-
-This covers the key concepts you need to understand about {sub_topic_title}. 
-
-I hope this explanation helps you grasp the important points. Please feel free to ask if you have any questions about this topic.
-
-Thank you for your attention."""
 
     async def handle_audio_only(self, data: dict):
         """Handle audio-only generation requests."""
@@ -739,9 +800,13 @@ Thank you for your attention."""
             })
             
             try:
+                # OPTIMIZED streaming for sub-300ms latency (consistent with chat_with_audio)
                 audio_start_time = time.time()
                 chunk_count = 0
                 total_audio_size = 0
+                first_chunk_sent = False
+                
+                log(f"🚀 Starting REAL-TIME audio-only streaming for: {text[:50]}...")
                 
                 async for audio_chunk in self.audio_service.stream_audio_from_text(text, language, self.websocket):
                     if audio_chunk and len(audio_chunk) > 0:
@@ -752,36 +817,64 @@ Thank you for your attention."""
                         import base64
                         audio_base64 = base64.b64encode(audio_chunk).decode('utf-8')
                         
+                        # Send chunk immediately
                         await self.websocket.send({
                             "type": "audio_chunk",
                             "chunk_id": chunk_count,
                             "audio_data": audio_base64,
                             "size": len(audio_chunk),
+                            "is_first_chunk": not first_chunk_sent,
                             "request_id": data.get("request_id", "")
                         })
                         
-                        # Log first chunk latency
-                        if chunk_count == 1:
+                        # Log first chunk latency (CRITICAL METRIC - consistent with chat)
+                        if not first_chunk_sent:
                             first_audio_latency = (time.time() - audio_start_time) * 1000
-                            log(f"First audio chunk delivered in {first_audio_latency:.0f}ms")
+                            log(f"🎯 FIRST AUDIO-ONLY CHUNK delivered in {first_audio_latency:.0f}ms")
+                            
+                            if first_audio_latency <= 300:
+                                log(f"🎉 TARGET ACHIEVED! Sub-300ms latency: {first_audio_latency:.0f}ms")
+                            elif first_audio_latency <= 900:
+                                log(f"✅ GOOD latency: {first_audio_latency:.0f}ms (under 900ms target)")
+                            else:
+                                log(f"⚠️ HIGH latency: {first_audio_latency:.0f}ms (needs optimization)")
+                            
+                            first_chunk_sent = True
+                        else:
+                            # Log subsequent chunks
+                            chunk_time = (time.time() - audio_start_time) * 1000
+                            log(f"   Chunk {chunk_count}: {len(audio_chunk)} bytes at {chunk_time:.0f}ms")
                 
                 # Send completion message
                 await self.websocket.send({
                     "type": "audio_generation_complete",
                     "total_chunks": chunk_count,
                     "total_size": total_audio_size,
+                    "first_chunk_latency": (time.time() - audio_start_time) * 1000 if first_chunk_sent else 0,
                     "request_id": data.get("request_id", "")
                 })
                 
                 audio_total_time = (time.time() - audio_start_time) * 1000
-                log(f"Audio-only generation complete: {chunk_count} chunks, {total_audio_size} bytes in {audio_total_time:.0f}ms")
+                log(f"🏁 Audio-only streaming complete: {chunk_count} chunks, {total_audio_size} bytes in {audio_total_time:.0f}ms")
                 
+            except ConnectionClosed as e:
+                log_disconnection(self.client_id, e, "during audio-only streaming")
+                if is_normal_closure(e):
+                    log(f"🔌 Client disconnected normally - audio-only streaming completed")
+                else:
+                    log(f"❌ Audio-only streaming interrupted by connection error")
+                    self.conversation_metrics["errors"] += 1
             except Exception as e:
-                log(f"Audio generation error: {e}")
-                await self.websocket.send({
-                    "type": "error",
-                    "error": f"Audio generation failed: {str(e)}"
-                })
+                log(f"❌ Audio-only generation error: {e}")
+                self.conversation_metrics["errors"] += 1
+                try:
+                    await self.websocket.send({
+                        "type": "error",
+                        "error": f"Audio generation failed: {str(e)}"
+                    })
+                except ConnectionClosed as conn_e:
+                    log_disconnection(self.client_id, conn_e, "while sending error message")
+                    return
             
             # Update metrics
             total_time = time.time() - request_start_time
@@ -802,6 +895,102 @@ Thank you for your attention."""
                 "type": "error",
                 "error": f"Audio processing failed: {str(e)}"
             })
+
+    def _is_websocket_connected(self):
+        """Safely check if WebSocket connection is still active."""
+        try:
+            if not hasattr(self, 'websocket') or not self.websocket:
+                return False
+            
+            # Try different ways to check connection status
+            websocket_obj = getattr(self.websocket, 'websocket', None)
+            if websocket_obj:
+                # Check for closed attribute
+                if hasattr(websocket_obj, 'closed'):
+                    return not websocket_obj.closed
+                # Check for state attribute (websockets library)
+                if hasattr(websocket_obj, 'state'):
+                    # State 1 = OPEN, others are closed/closing
+                    return websocket_obj.state == 1
+            
+            # If we can't determine status, assume connected to continue processing
+            return True
+            
+        except Exception as e:
+            log(f"Error checking WebSocket status: {e}")
+            # On error, assume disconnected for safety
+            return False
+
+    async def _load_course_data_async(self, course_id=None):
+        """Load course data asynchronously with proper error handling."""
+        try:
+            import os
+            import json
+            import config
+            
+            # Load from the same path as the HTTP endpoints use
+            if os.path.exists(config.OUTPUT_JSON_PATH):
+                with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
+                    course_data = json.load(f)
+                
+                # Add course_id if provided
+                if course_id:
+                    course_data["course_id"] = course_id
+                
+                log(f"Course data loaded from {config.OUTPUT_JSON_PATH}: {len(course_data.get('modules', []))} modules")
+                return course_data
+            
+            # Try to load from the document service as secondary option
+            if hasattr(self, 'document_service') and self.document_service:
+                try:
+                    course_data = await self.document_service.get_all_courses()
+                    if course_data and len(course_data) > 0:
+                        course = course_data[0]
+                        if course_id:
+                            course["course_id"] = course_id
+                        log(f"Course data loaded from document service: {len(course.get('modules', []))} modules")
+                        return course
+                except Exception as e:
+                    log(f"Document service course loading failed: {e}")
+            
+            # Final fallback
+            log(f"No course data found at {config.OUTPUT_JSON_PATH}, using fallback")
+            return self._create_fallback_course_data()
+            
+        except Exception as e:
+            log(f"Error loading course data: {e}")
+            return self._create_fallback_course_data()
+    
+    def _create_fallback_course_data(self):
+        """Create fallback course data when files are not available."""
+        return {
+            "course_id": "fallback_course",
+            "course_title": "Sample Educational Course",
+            "modules": [
+                {
+                    "title": "Introduction to Learning",
+                    "sub_topics": [
+                        {
+                            "title": "Getting Started",
+                            "content": "Welcome to this educational journey. In this introduction, we will explore the fundamentals of learning and how to make the most of your educational experience. Learning is a continuous process that involves acquiring new knowledge, skills, and understanding through study, experience, or teaching."
+                        },
+                        {
+                            "title": "Study Methods", 
+                            "content": "Effective study methods are crucial for academic success. Some proven techniques include active reading, note-taking, spaced repetition, and practice testing. These methods help improve retention and understanding of the material."
+                        }
+                    ]
+                },
+                {
+                    "title": "Core Concepts",
+                    "sub_topics": [
+                        {
+                            "title": "Fundamental Principles",
+                            "content": "Understanding fundamental principles is essential for building a strong foundation in any subject. These principles serve as the building blocks for more advanced concepts and applications."
+                        }
+                    ]
+                }
+            ]
+        }
 
     async def handle_transcribe_audio(self, data: dict):
         """Handle audio transcription requests."""
@@ -941,15 +1130,17 @@ Thank you for your attention."""
         except Exception as e:
             log(f"Error during cleanup for {self.client_id}: {e}")
 
-async def websocket_handler(websocket):
+async def websocket_handler(websocket, path=None):
     """
-    Main WebSocket handler for ProfAI connections.
+    Main WebSocket handler for ProfAI connections with improved error handling.
     """
     connection_start_time = time.time()
     client_id = f"profai_client_{int(connection_start_time)}"
     try:
-        remote_address = websocket.remote_address
-    except:
+        remote_address = getattr(websocket, 'remote_address', 'unknown')
+        if hasattr(remote_address, '__iter__') and not isinstance(remote_address, str):
+            remote_address = f"{remote_address[0]}:{remote_address[1]}"
+    except Exception:
         remote_address = "unknown"
     log(f"New client connected: {client_id} from {remote_address}")
     
@@ -1034,62 +1225,27 @@ async def basic_websocket_handler(websocket_wrapper: ProfAIWebSocketWrapper, cli
             })
         except Exception as e:
             log(f"❌ Basic handler error for {client_id}: {e}")
-            # Only try to send error message if client is still connected
-            if is_client_connected(websocket_wrapper.websocket):
-                try:
-                    await websocket_wrapper.send({
-                        "type": "error",
-                        "error": f"Basic handler error: {str(e)}"
-                    })
-                except ConnectionClosed as conn_e:
-                    log_disconnection(client_id, conn_e, "while sending error message in basic handler")
-                    break
-
-async def start_websocket_server(host: str = "0.0.0.0", port: int = 8765):
-    """
-    Start the ProfAI WebSocket server with enhanced error handling and performance monitoring.
-    """
-    log(f"Starting ProfAI WebSocket server on {host}:{port}")
-    
-    try:
-        # Start the WebSocket server with enhanced configuration
-        server = await websockets.serve(
-            websocket_handler,
-            host,
-            port,
-            ping_interval=20,  # Send ping every 20 seconds
-            ping_timeout=10,   # Wait 10 seconds for pong
-            close_timeout=10,  # Wait 10 seconds for close
-            max_size=10 * 1024 * 1024,  # 10MB max message size
-            max_queue=32,      # Max queued messages
-            compression=None   # Disable compression for speed
-        )
-        
-        log(f"✅ ProfAI WebSocket server started successfully on {host}:{port}")
-        log(f"🚀 Server optimized for sub-300ms audio streaming latency")
-        log(f"📊 Performance monitoring enabled")
-        
-        # Keep the server running
-        await server.wait_closed()
-        
-    except Exception as e:
-        log(f"❌ Failed to start WebSocket server: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+            try:
+                await websocket_wrapper.send({
+                    "type": "error",
+                    "error": f"Basic handler error: {str(e)}"
+                })
+            except ConnectionClosed as conn_e:
+                log_disconnection(client_id, conn_e, "while sending error message in basic handler")
+                break
 
 async def start_websocket_server(host: str = "0.0.0.0", port: int = 8765):
     """
     Start the ProfAI WebSocket server with optimized configuration.
     """
-    # Enhanced WebSocket server configuration for better performance
+    # Enhanced WebSocket server configuration for stability
     server_config = {
-        "ping_interval": 20,  # Send ping every 20 seconds
-        "ping_timeout": 10,   # Wait 10 seconds for pong
-        "close_timeout": 10,  # Wait 10 seconds for close
+        "ping_interval": 30,  # Send ping every 30 seconds
+        "ping_timeout": 20,   # Wait 20 seconds for pong
+        "close_timeout": 5,   # Wait 5 seconds for close
         "max_size": 2**20,    # 1MB max message size
-        "max_queue": 32,      # Max queued messages per connection
-        "compression": "deflate",  # Enable compression for better performance
+        "max_queue": 16,      # Reduced queue size for stability
+        "compression": None,  # Disable compression to reduce complexity
     }
     
     log(f"Starting ProfAI WebSocket server on {host}:{port}")
@@ -1149,15 +1305,14 @@ def main():
         traceback.print_exc()
 
 def run_websocket_server_in_thread(host: str = "0.0.0.0", port: int = 8765):
-    """    Run WebSocket server in a separate thread for integration with Flask.
-"""
+    """Run WebSocket server in a separate thread for integration with Flask."""
+    def run_server():
+        asyncio.run(start_websocket_server(host, port))
+    
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
     log(f"WebSocket server thread started on {host}:{port}")
     return thread
-
-def run_server():
-        asyncio.run(start_websocket_server(host, port))
 
 if __name__ == "__main__":
     main()

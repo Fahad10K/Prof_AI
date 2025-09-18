@@ -13,20 +13,40 @@ import os
 # Add current directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-def start_fastapi_server():
-    """Start FastAPI server in a separate thread."""
-    import uvicorn
-    from app import app
-    
-    print("🚀 Starting FastAPI server on http://localhost:5001")
-    uvicorn.run(app, host="0.0.0.0", port=5001, log_level="info")
+# Force clean module reloading by clearing import cache
+if hasattr(sys, '_clear_type_cache'):
+    sys._clear_type_cache()
 
-def start_websocket_server():
-    """Start WebSocket server."""
+# Clear any existing module cache for our services
+modules_to_clear = [mod for mod in sys.modules if 'sarvam' in mod.lower()]
+for mod in modules_to_clear:
+    del sys.modules[mod]
+
+def start_fastapi_server():
+    """Start FastAPI server in a separate thread with proper async handling."""
+    try:
+        import uvicorn
+        from app import app
+        
+        print("🚀 Starting FastAPI server on http://localhost:5001")
+        # Create completely isolated event loop for FastAPI thread
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run without loop parameter to avoid ProactorEventLoop error
+        uvicorn.run(app, host="0.0.0.0", port=5001, log_level="warning")
+    except Exception as e:
+        print(f"❌ FastAPI startup error: {e}")
+        import traceback
+        traceback.print_exc()
+
+async def start_websocket_server_async():
+    """Start WebSocket server asynchronously."""
     from websocket_server import start_websocket_server
     
     print("🌐 Starting WebSocket server on ws://localhost:8765")
-    asyncio.run(start_websocket_server("0.0.0.0", 8765))
+    await start_websocket_server("0.0.0.0", 8765)
 
 def main():
     """Main startup function."""
@@ -81,8 +101,8 @@ def main():
         print("🔧 Quick test: python quick_test_websocket.py")
         print("\n🌐 Starting WebSocket server...")
         
-        # Start WebSocket server (blocking)
-        start_websocket_server()
+        # Start WebSocket server (blocking) with proper async handling
+        asyncio.run(start_websocket_server_async())
         
     except KeyboardInterrupt:
         print("\n🛑 Shutting down servers...")
