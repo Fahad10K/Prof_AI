@@ -146,10 +146,27 @@ async def get_course_content(course_id: str):
     try:
         if os.path.exists(config.OUTPUT_JSON_PATH):
             with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
-                course_data = json.load(f)
-                course_data["course_id"] = course_id
-                return course_data
-        raise HTTPException(status_code=404, detail="Course not found")
+                data = json.load(f)
+            
+            # Handle both single course and multi-course formats
+            if isinstance(data, dict) and 'course_title' in data:
+                # Single course format
+                if str(data.get("course_id", 1)) == str(course_id):
+                    return data
+                else:
+                    raise HTTPException(status_code=404, detail=f"Course {course_id} not found")
+            elif isinstance(data, list):
+                # Multi-course format - find the specific course
+                for course in data:
+                    if str(course.get("course_id", "")) == str(course_id):
+                        return course
+                raise HTTPException(status_code=404, detail=f"Course {course_id} not found")
+            else:
+                raise HTTPException(status_code=500, detail="Invalid course data format")
+                
+        raise HTTPException(status_code=404, detail="No courses found")
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"Error loading course {course_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -168,7 +185,17 @@ async def generate_module_quiz(request: QuizRequest):
             raise HTTPException(status_code=404, detail="Course content not found")
         
         with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
-            course_content = json.load(f)
+            data = json.load(f)
+        
+        # Handle both single course and multi-course formats
+        if isinstance(data, dict) and 'course_title' in data:
+            # Single course format
+            course_content = data
+        elif isinstance(data, list) and len(data) > 0:
+            # Multi-course format - use the first course for now
+            course_content = data[0]
+        else:
+            raise HTTPException(status_code=404, detail="No valid course content found")
         
         # Validate module week exists
         module_weeks = [mod.get("week") for mod in course_content.get("modules", [])]
@@ -209,7 +236,17 @@ async def generate_course_quiz():
             raise HTTPException(status_code=404, detail="Course content not found")
         
         with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
-            course_content = json.load(f)
+            data = json.load(f)
+        
+        # Handle both single course and multi-course formats
+        if isinstance(data, dict) and 'course_title' in data:
+            # Single course format
+            course_content = data
+        elif isinstance(data, list) and len(data) > 0:
+            # Multi-course format - use the first course for now
+            course_content = data[0]
+        else:
+            raise HTTPException(status_code=404, detail="No valid course content found")
         
         logging.info("Generating comprehensive course quiz")
         quiz = await quiz_service.generate_course_quiz(course_content)
@@ -382,7 +419,27 @@ async def start_class_endpoint(request: dict):
             raise HTTPException(status_code=404, detail="Course content not found")
         
         with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
-            course_data = json.load(f)
+            data = json.load(f)
+        
+        # Handle both single course and multi-course formats
+        if isinstance(data, dict) and 'course_title' in data:
+            # Single course format
+            course_data = data
+        elif isinstance(data, list):
+            # Multi-course format - find the specific course by ID
+            course_data = None
+            for course in data:
+                if str(course.get("course_id", "")) == str(course_id):
+                    course_data = course
+                    break
+            if not course_data:
+                # If no specific course found, use the first one
+                course_data = data[0] if data else None
+        else:
+            course_data = None
+            
+        if not course_data:
+            raise HTTPException(status_code=404, detail="Course content not found")
         
         # Validate indices
         if module_index >= len(course_data.get("modules", [])):
@@ -674,7 +731,28 @@ async def handle_start_class(websocket: WebSocket, data: dict, teaching_service,
                 return
             
             with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
-                course_data = json.load(f)
+                data = json.load(f)
+            
+            # Handle both single course and multi-course formats
+            if isinstance(data, dict) and 'course_title' in data:
+                # Single course format
+                course_data = data
+            elif isinstance(data, list):
+                # Multi-course format - find the specific course by ID
+                course_data = None
+                for course in data:
+                    if str(course.get("course_id", "")) == str(course_id):
+                        course_data = course
+                        break
+                if not course_data:
+                    # If no specific course found, use the first one
+                    course_data = data[0] if data else None
+            else:
+                course_data = None
+                
+            if not course_data:
+                await websocket.send_json({"type": "error", "error": "Course content not found"})
+                return
             
             # Validate indices
             if module_index >= len(course_data.get("modules", [])):

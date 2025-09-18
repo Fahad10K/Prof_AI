@@ -64,7 +64,7 @@ data/quizzes/*
 !data/quizzes/.gitkeep
 data/quiz_answers/*
 !data/quiz_answers/.gitkeep
-# Temporary files
+Temporary files
 temp_downloads/
 
 data.zip

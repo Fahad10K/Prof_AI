@@ -17,8 +17,9 @@ VECTORSTORE_DIR = os.path.join(DATA_DIR, "vectorstore")
 COURSES_DIR = os.path.join(DATA_DIR, "courses")
 
 # --- Database Settings ---
-
-CHROMA_DB_PATH = VECTORSTORE_DIR
+# Use dedicated subdirectories to avoid conflicts and file-lock issues on Windows
+CHROMA_DB_PATH = os.path.join(VECTORSTORE_DIR, "chroma")
+FAISS_DB_PATH = os.path.join(VECTORSTORE_DIR, "faiss")
 CHROMA_COLLECTION_NAME = "profai_documents"
 
 # --- LLM & RAG Settings ---
@@ -75,4 +76,6 @@ Answer:"""
 # Create directories if they don't exist
 os.makedirs(DOCUMENTS_DIR, exist_ok=True)
 os.makedirs(VECTORSTORE_DIR, exist_ok=True)
+os.makedirs(CHROMA_DB_PATH, exist_ok=True)
+os.makedirs(FAISS_DB_PATH, exist_ok=True)
 os.makedirs(COURSES_DIR, exist_ok=True)

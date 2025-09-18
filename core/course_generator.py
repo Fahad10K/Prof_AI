@@ -81,7 +81,22 @@ class CourseGenerator:
         
         try:
             chain = prompt | self.curriculum_model | self.curriculum_parser
-            curriculum = chain.invoke({"context": context_str})
+            result = chain.invoke({"context": context_str})
+            
+            logging.info(f"Raw curriculum result type: {type(result)}")
+            logging.info(f"Raw curriculum result: {result}")
+            
+            # Handle case where result might be a dict instead of CourseLMS object
+            if isinstance(result, dict):
+                logging.info("Converting dict result to CourseLMS object")
+                curriculum = CourseLMS(**result)
+            else:
+                curriculum = result
+            
+            # Validate that curriculum has modules
+            if not hasattr(curriculum, 'modules') or not curriculum.modules:
+                logging.error("Generated curriculum has no modules")
+                return None
             
             # Override title if provided
             if course_title and hasattr(curriculum, 'course_title'):
@@ -92,6 +107,8 @@ class CourseGenerator:
             
         except Exception as e:
             logging.error(f"Error generating curriculum: {e}")
+            import traceback
+            logging.error(f"Traceback: {traceback.format_exc()}")
             return None
     
     def _generate_content(self, curriculum: CourseLMS, retriever) -> CourseLMS:
