@@ -12,7 +12,7 @@ class LLMService:
     def __init__(self):
         self.client = AsyncOpenAI(
             api_key=config.OPENAI_API_KEY,
-            timeout=8.0  # 8 second timeout for all requests
+            timeout=60.0  # 60 second timeout for quiz generation
         )
     
     async def get_general_response(self, query: str, target_language: str = "English") -> str:

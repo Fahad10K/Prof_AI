@@ -15,7 +15,7 @@ class RAGService:
     def __init__(self, vectorstore: Chroma):
         self.vectorstore = vectorstore
         self.llm = ChatGroq(
-            model="llama3-8b-8192",
+            model="llama-3.1-8b-instant",  # Updated to current model
             temperature=0,
             groq_api_key=config.GROQ_API_KEY
         )

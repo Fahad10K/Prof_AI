@@ -23,7 +23,7 @@ import base64
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from models.schemas import CourseLMS, TTSRequest
+from models.schemas import CourseLMS, TTSRequest, QuizRequest, QuizSubmission
 
 # Import WebSocket server
 from websocket_server import run_websocket_server_in_thread
@@ -34,6 +34,7 @@ try:
     from services.document_service import DocumentService
     from services.audio_service import AudioService
     from services.teaching_service import TeachingService
+    from services.quiz_service import QuizService
     SERVICES_AVAILABLE = True
     print("✅ All services loaded successfully")
 except ImportError as e:
@@ -69,6 +70,7 @@ chat_service = None
 document_service = None
 audio_service = None
 teaching_service = None
+quiz_service = None
 
 if SERVICES_AVAILABLE:
     try:
@@ -76,6 +78,7 @@ if SERVICES_AVAILABLE:
         document_service = DocumentService()
         audio_service = AudioService()
         teaching_service = TeachingService()
+        quiz_service = QuizService()
         print("✅ All services initialized successfully")
     except Exception as e:
         print(f"⚠️ Failed to initialize services: {e}")
@@ -114,12 +117,24 @@ async def get_courses():
     try:
         if os.path.exists(config.OUTPUT_JSON_PATH):
             with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
-                course_data = json.load(f)
+                data = json.load(f)
+            
+            # Handle both single course and multi-course formats
+            if isinstance(data, dict) and 'course_title' in data:
+                # Single course format
                 return [{
-                    "course_id": "1",  # Single course system
-                    "course_title": course_data.get("course_title", "Generated Course"),
-                    "modules": len(course_data.get("modules", []))
+                    "course_id": data.get("course_id", 1),
+                    "course_title": data.get("course_title", "Generated Course"),
+                    "modules": len(data.get("modules", []))
                 }]
+            elif isinstance(data, list):
+                # Multi-course format
+                return [{
+                    "course_id": course.get("course_id", i+1),
+                    "course_title": course.get("course_title", f"Course {i+1}"),
+                    "modules": len(course.get("modules", []))
+                } for i, course in enumerate(data)]
+                
         return []
     except Exception as e:
         logging.error(f"Error loading courses: {e}")
@@ -137,6 +152,123 @@ async def get_course_content(course_id: str):
         raise HTTPException(status_code=404, detail="Course not found")
     except Exception as e:
         logging.error(f"Error loading course {course_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ===== QUIZ ENDPOINTS =====
+
+@app.post("/api/quiz/generate-module")
+async def generate_module_quiz(request: QuizRequest):
+    """Generate a 20-question MCQ quiz for a specific module."""
+    if not SERVICES_AVAILABLE or not quiz_service:
+        raise HTTPException(status_code=503, detail="Quiz service not available")
+    
+    try:
+        # Load course content
+        if not os.path.exists(config.OUTPUT_JSON_PATH):
+            raise HTTPException(status_code=404, detail="Course content not found")
+        
+        with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
+            course_content = json.load(f)
+        
+        # Validate module week exists
+        module_weeks = [mod.get("week") for mod in course_content.get("modules", [])]
+        if request.module_week not in module_weeks:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Module week {request.module_week} not found. Available weeks: {module_weeks}"
+            )
+        
+        logging.info(f"Generating module quiz for week {request.module_week}")
+        quiz = await quiz_service.generate_module_quiz(request.module_week, course_content)
+        
+        # Return quiz without answers for security
+        quiz_display = quiz_service.get_quiz_without_answers(quiz.quiz_id)
+        if not quiz_display:
+            raise HTTPException(status_code=500, detail="Failed to prepare quiz for display")
+        
+        return {
+            "message": "Module quiz generated successfully",
+            "quiz": quiz_display.dict()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error generating module quiz: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/quiz/generate-course")
+async def generate_course_quiz():
+    """Generate a 40-question MCQ quiz covering the entire course."""
+    if not SERVICES_AVAILABLE or not quiz_service:
+        raise HTTPException(status_code=503, detail="Quiz service not available")
+    
+    try:
+        # Load course content
+        if not os.path.exists(config.OUTPUT_JSON_PATH):
+            raise HTTPException(status_code=404, detail="Course content not found")
+        
+        with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
+            course_content = json.load(f)
+        
+        logging.info("Generating comprehensive course quiz")
+        quiz = await quiz_service.generate_course_quiz(course_content)
+        
+        # Return quiz without answers for security
+        quiz_display = quiz_service.get_quiz_without_answers(quiz.quiz_id)
+        if not quiz_display:
+            raise HTTPException(status_code=500, detail="Failed to prepare quiz for display")
+        
+        return {
+            "message": "Course quiz generated successfully",
+            "quiz": quiz_display.dict()
+        }
+        
+    except Exception as e:
+        logging.error(f"Error generating course quiz: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/quiz/submit")
+async def submit_quiz(submission: QuizSubmission):
+    """Submit quiz answers and get evaluation results."""
+    if not SERVICES_AVAILABLE or not quiz_service:
+        raise HTTPException(status_code=503, detail="Quiz service not available")
+    
+    try:
+        logging.info(f"Processing quiz submission for quiz {submission.quiz_id} by user {submission.user_id}")
+        
+        # Evaluate the quiz submission
+        result = quiz_service.evaluate_quiz(submission)
+        
+        return {
+            "message": "Quiz evaluated successfully",
+            "result": result.dict()
+        }
+        
+    except ValueError as ve:
+        logging.error(f"Validation error in quiz submission: {ve}")
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logging.error(f"Error evaluating quiz: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/quiz/{quiz_id}")
+async def get_quiz(quiz_id: str):
+    """Get a specific quiz (without answers) for display."""
+    if not SERVICES_AVAILABLE or not quiz_service:
+        raise HTTPException(status_code=503, detail="Quiz service not available")
+    
+    try:
+        quiz = quiz_service.get_quiz_without_answers(quiz_id)
+        if not quiz:
+            raise HTTPException(status_code=404, detail=f"Quiz {quiz_id} not found")
+        
+        return {"quiz": quiz.dict()}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error retrieving quiz {quiz_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ===== CHAT & COMMUNICATION ENDPOINTS =====
