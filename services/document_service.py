@@ -6,7 +6,6 @@ import os
 import shutil
 import json
 import logging
-import time
 from typing import List
 from fastapi import UploadFile
 from langchain_core.documents import Document
@@ -71,27 +70,10 @@ class DocumentService:
             if not vector_store:
                 raise Exception("Vector store could not be created")
             
-            # Save vector store (FAISS) to its own directory to avoid conflicts with Chroma DB
-            # Use a Windows-safe retry delete to avoid transient file locks
-            if os.path.exists(config.FAISS_DB_PATH):
-                for attempt in range(3):
-                    try:
-                        shutil.rmtree(config.FAISS_DB_PATH)
-                        break
-                    except Exception as e:
-                        logging.warning(f"Failed to remove FAISS DB dir on attempt {attempt+1}: {e}")
-                        if attempt < 2:  # Only sleep if not the last attempt
-                            time.sleep(0.2 * (attempt + 1))
-                        else:
-                            logging.error(f"Could not remove FAISS DB directory after 3 attempts: {e}")
-                            # Try to create a new directory with timestamp to avoid conflicts
-                            import uuid
-                            config.FAISS_DB_PATH = os.path.join(config.VECTORSTORE_DIR, f"faiss_{uuid.uuid4().hex[:8]}")
-                            logging.info(f"Using alternative FAISS path: {config.FAISS_DB_PATH}")
-            
-            # Ensure the directory exists
-            os.makedirs(config.FAISS_DB_PATH, exist_ok=True)
-            vectorizer.save_vector_store(vector_store, config.FAISS_DB_PATH)
+            # Save vector store
+            if os.path.exists(config.VECTORSTORE_DIR):
+                shutil.rmtree(config.VECTORSTORE_DIR)
+            vectorizer.save_vector_store(vector_store, config.VECTORSTORE_DIR)
 
             logging.info("STEP 4: Generating course...")
             course_generator = CourseGenerator()
@@ -100,11 +82,11 @@ class DocumentService:
             if not final_course:
                 raise Exception("Course generation failed")
 
-            # Save course output - append to existing courses with validation
+            # Save course output - append to existing courses
             logging.info("STEP 5: Saving course...")
             os.makedirs(config.COURSES_DIR, exist_ok=True)
             
-            # Convert course to dictionary and validate structure
+             # Convert course to dictionary and validate structure
             course_dict = self._validate_and_prepare_course(final_course, course_title)
             
             # Load existing courses and append new course
@@ -114,23 +96,21 @@ class DocumentService:
             # Ensure unique course title
             course_dict = self._ensure_unique_title(course_dict, existing_courses)
             
-            # Assign unique course ID
+           # Assing course id   
             course_dict['course_id'] = next_course_id
             
             # Append new course to existing courses
             existing_courses.append(course_dict)
             
-            # Save updated course list with validation
             self._save_courses_to_file(existing_courses)
             
             logging.info(f"Course generation completed successfully! Course ID: {next_course_id}")
             logging.info(f"Total courses in database: {len(existing_courses)}")
             return course_dict
-            
+             
         except Exception as e:
             logging.error(f"Error processing PDFs: {e}")
             raise e
-    
     def _validate_and_prepare_course(self, course, course_title: str = None):
         """Validate and prepare course data for saving."""
         try:
@@ -279,6 +259,7 @@ class DocumentService:
             logging.error(f"Failed to save courses: {e}")
             raise ValueError(f"Failed to save courses: {e}")
 
+
 class DocumentProcessor:
     """Helper class for document processing operations."""
     
@@ -351,8 +332,7 @@ class DocumentProcessor:
                 print("⚠️ Invalid course data format")
                 return []
             
-            return all_documents
-            
+            return all_documents            
         except Exception as e:
             print(f"Error loading course content: {e}")
             return []

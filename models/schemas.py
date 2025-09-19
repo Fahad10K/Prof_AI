@@ -74,9 +74,11 @@ class QuizResult(BaseModel):
     passed: bool = Field(description="Whether user passed (>= 60%)")
     detailed_results: List[dict] = Field(description="Detailed per-question results")
 
+
 class QuizRequest(BaseModel):
     """Request model for quiz generation."""
     quiz_type: str = Field(description="Type: 'module' or 'course'")
+    course_id: str = Field(description="Course identifier for quiz generation")
     module_week: Optional[int] = Field(None, description="Module week number for module quizzes")
 
 # Display Models (for client without answers)

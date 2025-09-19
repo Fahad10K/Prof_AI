@@ -122,14 +122,14 @@ class SarvamService:
             text = re.sub(r'[*#_`\[\]{}\\]', ' ', text)
             text = re.sub(r'\s+', ' ', text).strip()
             
-            # Use fastest possible generation with timeout
+            # Use fastest possible generation with longer timeout
             return await asyncio.wait_for(
                 self._generate_audio_single(text, language_code, speaker),
-                timeout=5.0  # 5 second max timeout
+                timeout=10.0  # 10 second max timeout for better reliability
             )
             
         except asyncio.TimeoutError:
-            print(f"❌ Ultra-fast TTS timeout after 5s")
+            print(f"❌ Ultra-fast TTS timeout after 10s")
             return io.BytesIO()
         except Exception as e:
             print(f"❌ Ultra-fast TTS error: {e}")
@@ -170,37 +170,16 @@ class SarvamService:
                         import base64
                         audio_bytes = base64.b64decode(audio_chunk_b64)
                         
-                        # Break large chunks into smaller pieces to prevent WebSocket disconnections
-                        max_chunk_size = 4096  # 4KB max for stability
-                        if len(audio_bytes) > max_chunk_size:
-                            # Split into smaller chunks
-                            for i in range(0, len(audio_bytes), max_chunk_size):
-                                small_chunk = audio_bytes[i:i + max_chunk_size]
-                                chunk_count += 1
-                                
-                                # Debug: Show chunk content preview
-                                try:
-                                    chunk_preview = str(small_chunk[:50]) if small_chunk else "[empty]"
-                                    print(f"   ⚡ Split chunk {chunk_count}: {len(small_chunk)} bytes - Preview: {chunk_preview}...")
-                                except:
-                                    print(f"   ⚡ Split chunk {chunk_count}: {len(small_chunk)} bytes - [binary data]")
-                                
-                                yield small_chunk
-                                await asyncio.sleep(0.001)  # Small delay between chunks
-                        else:
-                            # Normal sized chunk
-                            # Debug: Show first 50 chars of chunk content
-                            try:
-                                chunk_preview = str(audio_bytes[:50]) if audio_bytes else "[empty]"
-                                print(f"   ⚡ Direct chunk {chunk_count}: {len(audio_bytes)} bytes - Preview: {chunk_preview}...")
-                            except:
-                                print(f"   ⚡ Direct chunk {chunk_count}: {len(audio_bytes)} bytes - [binary data]")
-                            
-                            yield audio_bytes
+                        print(f"   ⚡ Direct chunk {chunk_count}: {len(audio_bytes)} bytes")
+                        yield audio_bytes
                 
-                # Final flush like Contelligence
-                await tts_ws.flush()
-                print(f"   ✅ Direct streaming complete: {chunk_count} chunks")
+                # Final flush like Contelligence - with exception handling
+                try:
+                    await tts_ws.flush()
+                    print(f"   ✅ Direct streaming complete: {chunk_count} chunks")
+                except Exception as flush_error:
+                    print(f"   ⚠️ Flush failed (continuing anyway): {flush_error}")
+                    print(f"   ✅ Direct streaming complete: {chunk_count} chunks (flush skipped)")
                 
         except Exception as e:
             print(f"❌ Direct streaming failed: {e}")
@@ -229,10 +208,10 @@ class SarvamService:
                 # Start conversion immediately
                 await ws.convert(text)
                 
-                # Stream chunks with smaller sizing for stability
+                # Stream chunks with browser-compatible sizing
                 chunk_count = 0
                 audio_buffer = b''
-                max_chunk_size = 4096  # 4KB chunks for WebSocket stability
+                max_chunk_size = 8192  # 8KB chunks for browser compatibility
                 
                 async for message in ws:
                     if isinstance(message, AudioOutput) and message.data and message.data.audio:
@@ -246,12 +225,7 @@ class SarvamService:
                                 small_chunk = audio_buffer[:max_chunk_size]
                                 audio_buffer = audio_buffer[max_chunk_size:]
                                 
-                                # Debug: Show chunk content preview
-                                try:
-                                    chunk_preview = str(small_chunk[:50]) if small_chunk else "[empty]"
-                                    print(f"   ⚡ Chunk {chunk_count}: {len(small_chunk)} bytes - Preview: {chunk_preview}...")
-                                except:
-                                    print(f"   ⚡ Chunk {chunk_count}: {len(small_chunk)} bytes - [binary data]")
+                                print(f"   ⚡ Chunk {chunk_count}: {len(small_chunk)} bytes (browser-optimized)")
                                 yield small_chunk
                                 
                                 # Minimal delay for maximum speed
@@ -260,17 +234,16 @@ class SarvamService:
                 # Send remaining audio buffer
                 if audio_buffer:
                     chunk_count += 1
-                    # Debug: Show final chunk preview
-                    try:
-                        chunk_preview = str(audio_buffer[:50]) if audio_buffer else "[empty]"
-                        print(f"   ⚡ Final chunk {chunk_count}: {len(audio_buffer)} bytes - Preview: {chunk_preview}...")
-                    except:
-                        print(f"   ⚡ Final chunk {chunk_count}: {len(audio_buffer)} bytes - [binary data]")
+                    print(f"   ⚡ Final chunk {chunk_count}: {len(audio_buffer)} bytes")
                     yield audio_buffer
                 
-                # Always flush to complete the streaming
-                await ws.flush()
-                print(f"   ✅ Direct streaming complete: {chunk_count} browser-compatible chunks")
+                # Always flush to complete the streaming - with exception handling
+                try:
+                    await ws.flush()
+                    print(f"   ✅ Direct streaming complete: {chunk_count} browser-compatible chunks")
+                except Exception as flush_error:
+                    print(f"   ⚠️ Flush failed (continuing anyway): {flush_error}")
+                    print(f"   ✅ Direct streaming complete: {chunk_count} browser-compatible chunks (flush skipped)")
                             
         except Exception as e:
             error_msg = str(e)

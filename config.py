@@ -17,6 +17,7 @@ VECTORSTORE_DIR = os.path.join(DATA_DIR, "vectorstore")
 COURSES_DIR = os.path.join(DATA_DIR, "courses")
 
 # --- Database Settings ---
+
 # Use dedicated subdirectories to avoid conflicts and file-lock issues on Windows
 CHROMA_DB_PATH = os.path.join(VECTORSTORE_DIR, "chroma")
 FAISS_DB_PATH = os.path.join(VECTORSTORE_DIR, "faiss")

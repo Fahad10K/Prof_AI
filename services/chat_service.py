@@ -42,12 +42,11 @@ class ChatService:
                 # Load course documents
                 course_docs = self.document_processor.load_course_content_as_documents(config.OUTPUT_JSON_PATH)
                 if course_docs:
-                    print(f"📄 Loaded {len(course_docs)} course documents")
-                    
                     # Split documents
+                    print(f"📄 Loaded {len(course_docs)} course documents")
+                   
                     split_course_docs = self.document_processor.split_documents(course_docs)
-                    print(f"✂️ Split into {len(split_course_docs)} chunks")
-                    
+                    print(f"✂️ Split into {len(split_course_docs)} chunks")                    
                     # Create or update vectorstore
                     if self.vectorstore is None:
                         # Create new vectorstore with course content
@@ -57,13 +56,10 @@ class ChatService:
                         # Add to existing vectorstore
                         self.vectorstore.add_documents(split_course_docs)
                         print(f"✅ Added {len(split_course_docs)} course content chunks to existing vectorstore")
-                else:
-                    print("⚠️ No course documents found to load")
+                    
                         
         except Exception as e:
             print(f"⚠️ Could not load course content: {e}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
 
     async def ask_question(self, query: str, query_language_code: str = "en-IN") -> Dict[str, Any]:
         """Answer a question using RAG with multilingual support."""

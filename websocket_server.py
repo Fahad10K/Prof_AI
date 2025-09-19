@@ -307,10 +307,6 @@ class ProfAIAgent:
                 })
                 return
                 
-            # Validate connection state before processing
-            if not is_client_connected(self.websocket.websocket):
-                log(f"Client {self.client_id} disconnected before processing chat request")
-                return
             
             query = data.get("message")
             language = data.get("language", self.current_language)
@@ -335,10 +331,6 @@ class ProfAIAgent:
             # Get text response with enhanced error handling
             response_text = ""
             try:
-                # Check connection before making LLM call
-                if not is_client_connected(self.websocket.websocket):
-                    log(f"Client {self.client_id} disconnected before LLM call")
-                    return
                 
                 response_data = await asyncio.wait_for(
                     self.chat_service.ask_question(query, language),
@@ -353,10 +345,6 @@ class ProfAIAgent:
                     })
                     return
                 
-                # Check connection before sending text response
-                if not is_client_connected(self.websocket.websocket):
-                    log(f"Client {self.client_id} disconnected before sending text response")
-                    return
                 
                 # Send text response immediately
                 await self.websocket.send({
@@ -390,55 +378,41 @@ class ProfAIAgent:
                     log(f"Client {self.client_id} disconnected during error handling")
                 return
             
-            # Generate audio with REAL-TIME streaming
+            # Generate audio with REAL-TIME streaming - SAME AS START_CLASS
             await self.websocket.send({
                 "type": "audio_generation_started",
-                "message": "Starting real-time audio streaming..."
+                "message": "Generating audio..."
             })
             
             try:
-                # OPTIMIZED streaming for sub-300ms latency with connection stability
+                # OPTIMIZED streaming for sub-300ms latency (consistent with start_class)
                 audio_start_time = time.time()
                 chunk_count = 0
                 total_audio_size = 0
                 first_chunk_sent = False
                 
-                log(f"🚀 Starting REAL-TIME audio streaming for: {response_text[:50]}...")
-                
-                # Check connection before streaming
-                if not self._is_websocket_connected():
-                    log("⚠️ WebSocket connection closed before audio streaming")
-                    return
+                log(f"🚀 Starting REAL-TIME class audio streaming for: {response_text[:50]}...")
                 
                 async for audio_chunk in self.audio_service.stream_audio_from_text(response_text, language, self.websocket):
                     if audio_chunk and len(audio_chunk) > 0:
                         chunk_count += 1
                         total_audio_size += len(audio_chunk)
                         
-                        # Check connection stability before each chunk
-                        if not self._is_websocket_connected():
-                            log(f"⚠️ Connection closed during streaming at chunk {chunk_count}")
-                            break
-                        
                         # Convert to base64 for JSON transmission
                         import base64
                         audio_base64 = base64.b64encode(audio_chunk).decode('utf-8')
                         
-                        # Send chunk with connection check
-                        try:
-                            await self.websocket.send({
-                                "type": "audio_chunk",
-                                "chunk_id": chunk_count,
-                                "audio_data": audio_base64,
-                                "size": len(audio_chunk),
-                                "is_first_chunk": not first_chunk_sent,
-                                "request_id": data.get("request_id", "")
-                            })
-                        except Exception as send_error:
-                            log(f"⚠️ Failed to send audio chunk {chunk_count}: {send_error}")
-                            break
+                        # Send chunk immediately
+                        await self.websocket.send({
+                            "type": "audio_chunk",
+                            "chunk_id": chunk_count,
+                            "audio_data": audio_base64,
+                            "size": len(audio_chunk),
+                            "is_first_chunk": not first_chunk_sent,
+                            "request_id": data.get("request_id", "")
+                        })
                         
-                        # Log first chunk latency (CRITICAL METRIC)
+                        # Log first chunk latency (CRITICAL METRIC - consistent with start_class)
                         if not first_chunk_sent:
                             first_audio_latency = (time.time() - audio_start_time) * 1000
                             log(f"🎯 FIRST CHAT AUDIO CHUNK delivered in {first_audio_latency:.0f}ms")
@@ -452,41 +426,37 @@ class ProfAIAgent:
                             
                             first_chunk_sent = True
                         else:
-                            # Log subsequent chunks with less verbosity for performance
-                            if chunk_count % 5 == 0:  # Log every 5th chunk to reduce overhead
-                                chunk_time = (time.time() - audio_start_time) * 1000
-                                log(f"   Chunk {chunk_count}: {len(audio_chunk)} bytes at {chunk_time:.0f}ms")
-                        
-                        # Optimized delay for smooth browser streaming (reduced from 1ms)
-                        await asyncio.sleep(0.02)  # 20ms delay for stable playback chunks
+                            # Log subsequent chunks
+                            chunk_time = (time.time() - audio_start_time) * 1000
+                            log(f"   Chunk {chunk_count}: {len(audio_chunk)} bytes at {chunk_time:.0f}ms")
                 
-                # Send completion message
+                # Send completion message (consistent with start_class)
                 await self.websocket.send({
                     "type": "audio_generation_complete",
                     "total_chunks": chunk_count,
                     "total_size": total_audio_size,
                     "first_chunk_latency": (time.time() - audio_start_time) * 1000 if first_chunk_sent else 0,
+                    "message": "Chat audio ready to play!",
                     "request_id": data.get("request_id", "")
                 })
                 
                 audio_total_time = (time.time() - audio_start_time) * 1000
-                log(f"🏁 Audio streaming complete: {chunk_count} chunks, {total_audio_size} bytes in {audio_total_time:.0f}ms")
+                log(f"🏁 Chat audio streaming complete: {chunk_count} chunks, {total_audio_size} bytes in {audio_total_time:.0f}ms")
                 
             except ConnectionClosed as e:
-                log_disconnection(self.client_id, e, "during audio streaming")
+                log_disconnection(self.client_id, e, "during chat audio streaming")
                 if is_normal_closure(e):
-                    log(f"🔌 Client disconnected normally - audio streaming completed")
-                    # Don't count as error for normal disconnections
+                    log(f"🔌 Client disconnected normally - chat audio streaming completed")
                 else:
-                    log(f"❌ Audio streaming interrupted by connection error")
+                    log(f"❌ Chat audio streaming interrupted by connection error")
                     self.conversation_metrics["errors"] += 1
             except Exception as e:
-                log(f"❌ Audio generation error: {e}")
+                log(f"❌ Chat audio generation error: {e}")
                 self.conversation_metrics["errors"] += 1
                 try:
                     await self.websocket.send({
                         "type": "error",
-                        "error": f"Audio generation failed: {str(e)}"
+                        "error": f"Chat audio generation failed: {str(e)}"
                     })
                 except ConnectionClosed as conn_e:
                     log_disconnection(self.client_id, conn_e, "while sending error message")

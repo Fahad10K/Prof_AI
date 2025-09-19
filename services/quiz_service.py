@@ -9,7 +9,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Optional
 from services.llm_service import LLMService
-from models.schemas import Quiz, QuizQuestion, QuizSubmission, QuizResult, QuizDisplay, QuizQuestionDisplay
+from models.schemas import Quiz, QuizQuestion, QuizSubmission, QuizResult
 import config
 
 class QuizService:
@@ -48,24 +48,7 @@ class QuizService:
             logging.info(f"Generating 20-question quiz for module week {module_week}")
             
             quiz_prompt = self._create_module_quiz_prompt(module, module_content)
-            
-            # Try to generate quiz with retry logic
-            quiz_response = None
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    logging.info(f"Quiz generation attempt {attempt + 1}/{max_retries}")
-                    quiz_response = await self.llm_service.generate_response(quiz_prompt, temperature=0.7)
-                    if quiz_response and len(quiz_response.strip()) > 100:  # Basic validation
-                        break
-                except Exception as e:
-                    logging.warning(f"Quiz generation attempt {attempt + 1} failed: {e}")
-                    if attempt == max_retries - 1:
-                        # Use fallback quiz on final failure
-                        quiz_response = self._generate_fallback_quiz(module_content, 20)
-            
-            if not quiz_response:
-                raise ValueError("Failed to generate quiz after all attempts")
+            quiz_response = await self.llm_service.generate_response(quiz_prompt, temperature=0.7)
             
             # Parse the LLM response into structured quiz
             questions = self._parse_quiz_response(quiz_response, quiz_id)
@@ -111,57 +94,25 @@ class QuizService:
             
             logging.info("Generating 40-question course quiz")
             
-            # Generate quiz using LLM in chunks with retry logic
-            questions_1 = []
-            questions_2 = []
+            # Generate quiz using LLM in chunks (20 questions at a time for better results)
+            quiz_prompt_1 = self._create_course_quiz_prompt(all_content, part=1)
+            quiz_response_1 = await self.llm_service.generate_response(quiz_prompt_1, temperature=0.7)
+            questions_1 = self._parse_quiz_response(quiz_response_1, quiz_id, start_id=0)
             
-            # Part 1 - First 20 questions
-            max_retries = 2
-            for attempt in range(max_retries):
-                try:
-                    logging.info(f"Generating part 1 - attempt {attempt + 1}/{max_retries}")
-                    quiz_prompt_1 = self._create_course_quiz_prompt(all_content, part=1)
-                    quiz_response_1 = await self.llm_service.generate_response(quiz_prompt_1, temperature=0.7)
-                    if quiz_response_1 and len(quiz_response_1.strip()) > 100:
-                        questions_1 = self._parse_quiz_response(quiz_response_1, quiz_id, start_id=0)
-                        break
-                except Exception as e:
-                    logging.warning(f"Part 1 generation attempt {attempt + 1} failed: {e}")
-                    if attempt == max_retries - 1:
-                        # Use fallback for part 1
-                        fallback_response = self._generate_fallback_quiz(all_content[:4000], 20)
-                        questions_1 = self._parse_quiz_response(fallback_response, quiz_id, start_id=0)
-            
-            # Part 2 - Second 20 questions
-            for attempt in range(max_retries):
-                try:
-                    logging.info(f"Generating part 2 - attempt {attempt + 1}/{max_retries}")
-                    quiz_prompt_2 = self._create_course_quiz_prompt(all_content, part=2)
-                    quiz_response_2 = await self.llm_service.generate_response(quiz_prompt_2, temperature=0.7)
-                    if quiz_response_2 and len(quiz_response_2.strip()) > 100:
-                        questions_2 = self._parse_quiz_response(quiz_response_2, quiz_id, start_id=20)
-                        break
-                except Exception as e:
-                    logging.warning(f"Part 2 generation attempt {attempt + 1} failed: {e}")
-                    if attempt == max_retries - 1:
-                        # Use fallback for part 2
-                        fallback_response = self._generate_fallback_quiz(all_content[4000:], 20)
-                        questions_2 = self._parse_quiz_response(fallback_response, quiz_id, start_id=20)
+            quiz_prompt_2 = self._create_course_quiz_prompt(all_content, part=2)
+            quiz_response_2 = await self.llm_service.generate_response(quiz_prompt_2, temperature=0.7)
+            questions_2 = self._parse_quiz_response(quiz_response_2, quiz_id, start_id=20)
             
             # Combine all questions
             all_questions = questions_1 + questions_2
             
-            # Validate we have enough questions
-            if len(all_questions) < 10:  # Minimum threshold
-                raise ValueError(f"Generated insufficient questions: {len(all_questions)}. Quiz generation failed.")
-            
-            # Take exactly 40 questions (or as many as we have)
+            # Take exactly 40 questions
             all_questions = all_questions[:40]
             
             quiz = Quiz(
                 quiz_id=quiz_id,
                 title=f"Final Course Quiz: {course_content.get('course_title', 'Course Quiz')}",
-                description=f"{len(all_questions)}-question comprehensive MCQ quiz covering the entire course content",
+                description="40-question comprehensive MCQ quiz covering the entire course content",
                 questions=all_questions,
                 total_questions=len(all_questions),
                 quiz_type="course",
@@ -229,7 +180,7 @@ class QuizService:
             logging.error(f"Error evaluating quiz: {e}")
             raise e
     
-    def get_quiz_without_answers(self, quiz_id: str) -> Optional[QuizDisplay]:
+    def get_quiz_without_answers(self, quiz_id: str) -> Optional[Quiz]:
         """Get quiz for display (without correct answers)."""
         try:
             quiz_file = os.path.join(self.quiz_storage_dir, f"{quiz_id}.json")
@@ -239,28 +190,14 @@ class QuizService:
             with open(quiz_file, 'r', encoding='utf-8') as f:
                 quiz_data = json.load(f)
             
-            # Create display questions without correct answers
-            display_questions = []
+            # Remove correct answers from questions
             for question in quiz_data["questions"]:
-                display_questions.append(QuizQuestionDisplay(
-                    question_id=question["question_id"],
-                    question_text=question["question_text"],
-                    options=question["options"],
-                    topic=question.get("topic", "")
-                ))
+                if "correct_answer" in question:
+                    del question["correct_answer"]
+                if "explanation" in question:
+                    del question["explanation"]
             
-            # Create display quiz
-            display_quiz = QuizDisplay(
-                quiz_id=quiz_data["quiz_id"],
-                title=quiz_data["title"],
-                description=quiz_data["description"],
-                questions=display_questions,
-                total_questions=quiz_data["total_questions"],
-                quiz_type=quiz_data["quiz_type"],
-                module_week=quiz_data.get("module_week")
-            )
-            
-            return display_quiz
+            return Quiz(**quiz_data)
             
         except Exception as e:
             logging.error(f"Error loading quiz {quiz_id}: {e}")
@@ -493,42 +430,3 @@ EXPLANATION: [Brief explanation]"""
             
         except Exception as e:
             logging.error(f"Error storing submission result: {e}")
-    
-    def _generate_fallback_quiz(self, content: str, num_questions: int) -> str:
-        """Generate a simple fallback quiz when LLM fails."""
-        logging.info(f"Using fallback quiz generation for {num_questions} questions")
-        
-        # Create basic questions from content keywords
-        fallback_questions = []
-        
-        # Extract key topics from content
-        content_lines = content.split('\n')
-        topics = []
-        for line in content_lines:
-            if line.strip() and len(line.strip()) > 20:
-                topics.append(line.strip()[:100])  # First 100 chars of meaningful lines
-        
-        # Generate basic questions
-        for i in range(min(num_questions, len(topics), 10)):  # Max 10 fallback questions
-            topic = topics[i] if i < len(topics) else "General Knowledge"
-            
-            fallback_questions.append(f"""Q{i+1}. What is the main concept discussed in: "{topic[:50]}..."?
-A) Primary concept explanation
-B) Secondary concept explanation  
-C) Alternative explanation
-D) Incorrect explanation
-ANSWER: A
-EXPLANATION: This question covers the main concept from the content.""")
-        
-        # Fill remaining with general questions if needed
-        while len(fallback_questions) < min(num_questions, 10):
-            q_num = len(fallback_questions) + 1
-            fallback_questions.append(f"""Q{q_num}. Which of the following best describes the key learning objective?
-A) Understanding core concepts
-B) Memorizing facts only
-C) Ignoring practical applications
-D) Avoiding critical thinking
-ANSWER: A
-EXPLANATION: Learning focuses on understanding core concepts.""")
-        
-        return '\n\n'.join(fallback_questions)

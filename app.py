@@ -118,8 +118,7 @@ async def get_courses():
         if os.path.exists(config.OUTPUT_JSON_PATH):
             with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
-            # Handle both single course and multi-course formats
+                # Handle both single course and multi-course formats
             if isinstance(data, dict) and 'course_title' in data:
                 # Single course format
                 return [{
@@ -138,7 +137,6 @@ async def get_courses():
         return []
     except Exception as e:
         logging.error(f"Error loading courses: {e}")
-        return []
 
 @app.get("/api/course/{course_id}")
 async def get_course_content(course_id: str):
@@ -188,15 +186,20 @@ async def generate_module_quiz(request: QuizRequest):
             data = json.load(f)
         
         # Handle both single course and multi-course formats
+        course_content = None
         if isinstance(data, dict) and 'course_title' in data:
-            # Single course format
-            course_content = data
-        elif isinstance(data, list) and len(data) > 0:
-            # Multi-course format - use the first course for now
-            course_content = data[0]
-        else:
-            raise HTTPException(status_code=404, detail="No valid course content found")
+            # Single course format - check if course_id matches
+            if str(data.get("course_id", 1)) == str(request.course_id):
+                course_content = data
+        elif isinstance(data, list):
+            # Multi-course format - find the specific course by ID
+            for course in data:
+                if str(course.get("course_id", "")) == str(request.course_id):
+                    course_content = course
+                    break
         
+        if not course_content:
+            raise HTTPException(status_code=404, detail=f"Course {request.course_id} not found")
         # Validate module week exists
         module_weeks = [mod.get("week") for mod in course_content.get("modules", [])]
         if request.module_week not in module_weeks:
@@ -225,7 +228,7 @@ async def generate_module_quiz(request: QuizRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/quiz/generate-course")
-async def generate_course_quiz():
+async def generate_course_quiz(request: QuizRequest):
     """Generate a 40-question MCQ quiz covering the entire course."""
     if not SERVICES_AVAILABLE or not quiz_service:
         raise HTTPException(status_code=503, detail="Quiz service not available")
@@ -236,19 +239,25 @@ async def generate_course_quiz():
             raise HTTPException(status_code=404, detail="Course content not found")
         
         with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+           data = json.load(f)
         
         # Handle both single course and multi-course formats
+        course_content = None
         if isinstance(data, dict) and 'course_title' in data:
-            # Single course format
-            course_content = data
-        elif isinstance(data, list) and len(data) > 0:
-            # Multi-course format - use the first course for now
-            course_content = data[0]
-        else:
-            raise HTTPException(status_code=404, detail="No valid course content found")
+            # Single course format - check if course_id matches
+            if str(data.get("course_id", 1)) == str(request.course_id):
+                course_content = data
+        elif isinstance(data, list):
+            # Multi-course format - find the specific course by ID
+            for course in data:
+                if str(course.get("course_id", "")) == str(request.course_id):
+                    course_content = course
+                    break
         
-        logging.info("Generating comprehensive course quiz")
+        if not course_content:
+            raise HTTPException(status_code=404, detail=f"Course {request.course_id} not found")
+        
+        logging.info(f"Generating comprehensive course quiz for course: {course_content.get('course_title')}")
         quiz = await quiz_service.generate_course_quiz(course_content)
         
         # Return quiz without answers for security
@@ -440,7 +449,6 @@ async def start_class_endpoint(request: dict):
             
         if not course_data:
             raise HTTPException(status_code=404, detail="Course content not found")
-        
         # Validate indices
         if module_index >= len(course_data.get("modules", [])):
             raise HTTPException(status_code=400, detail="Module not found")
@@ -653,47 +661,75 @@ async def handle_chat_with_audio(websocket: WebSocket, data: dict, chat_service,
             })
             return
         
-        # Generate audio using the faster non-streaming method for now
+        # Generate audio with streaming - SAME PATTERN AS start_class
         await websocket.send_json({
-            "type": "audio_stream_start",
+            "type": "audio_generation_started",
             "message": "Generating audio..."
         })
         
         try:
-            logging.info("Starting audio generation...")
-            # Use ultra-fast generation for better reliability
-            audio_buffer = await audio_service.generate_audio_from_text(response_text, language, ultra_fast=True)
+            # OPTIMIZED streaming for sub-300ms latency (consistent with start_class)
+            audio_start_time = time.time()
+            chunk_count = 0
+            total_audio_size = 0
+            first_chunk_sent = False
             
-            if audio_buffer and audio_buffer.getbuffer().nbytes > 0:
-                logging.info(f"Audio generated: {audio_buffer.getbuffer().nbytes} bytes")
-                # Send as single chunk for now
-                audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode('utf-8')
-                await websocket.send_json({
-                    "type": "audio_chunk",
-                    "chunk_id": 1,
-                    "audio_data": audio_base64,
-                    "size": audio_buffer.getbuffer().nbytes
-                })
-                
-                await websocket.send_json({
-                    "type": "audio_stream_complete",
-                    "total_chunks": 1,
-                    "message": "Audio generation complete"
-                })
-            else:
-                logging.warning("No audio generated")
-                await websocket.send_json({
-                    "type": "error",
-                    "error": "Failed to generate audio - empty result"
-                })
+            logging.info(f"🚀 Starting REAL-TIME chat audio streaming for: {response_text[:50]}...")
+            
+            async for audio_chunk in audio_service.stream_audio_from_text(response_text, language, websocket):
+                if audio_chunk and len(audio_chunk) > 0:
+                    chunk_count += 1
+                    total_audio_size += len(audio_chunk)
+                    
+                    # Convert to base64 for JSON transmission
+                    audio_base64 = base64.b64encode(audio_chunk).decode('utf-8')
+                    
+                    # Send chunk immediately
+                    await websocket.send_json({
+                        "type": "audio_chunk",
+                        "chunk_id": chunk_count,
+                        "audio_data": audio_base64,
+                        "size": len(audio_chunk),
+                        "is_first_chunk": not first_chunk_sent
+                    })
+                    
+                    # Log first chunk latency (CRITICAL METRIC)
+                    if not first_chunk_sent:
+                        first_audio_latency = (time.time() - audio_start_time) * 1000
+                        logging.info(f"🎯 FIRST CHAT AUDIO CHUNK delivered in {first_audio_latency:.0f}ms")
+                        
+                        if first_audio_latency <= 300:
+                            logging.info(f"🎉 TARGET ACHIEVED! Sub-300ms latency: {first_audio_latency:.0f}ms")
+                        elif first_audio_latency <= 900:
+                            logging.info(f"✅ GOOD latency: {first_audio_latency:.0f}ms (under 900ms target)")
+                        else:
+                            logging.info(f"⚠️ HIGH latency: {first_audio_latency:.0f}ms (needs optimization)")
+                        
+                        first_chunk_sent = True
+                    else:
+                        # Log subsequent chunks
+                        chunk_time = (time.time() - audio_start_time) * 1000
+                        logging.info(f"   Chunk {chunk_count}: {len(audio_chunk)} bytes at {chunk_time:.0f}ms")
+            
+            # Send completion message (consistent with start_class)
+            await websocket.send_json({
+                "type": "audio_generation_complete",
+                "total_chunks": chunk_count,
+                "total_size": total_audio_size,
+                "first_chunk_latency": (time.time() - audio_start_time) * 1000 if first_chunk_sent else 0,
+                "message": "Chat audio ready to play!"
+            })
+            
+            audio_total_time = (time.time() - audio_start_time) * 1000
+            logging.info(f"🏁 Chat audio streaming complete: {chunk_count} chunks, {total_audio_size} bytes in {audio_total_time:.0f}ms")
                 
         except Exception as e:
-            logging.error(f"Audio generation error: {e}")
+            logging.error(f"❌ Chat audio generation error: {e}")
             import traceback
             traceback.print_exc()
             await websocket.send_json({
                 "type": "error",
-                "error": f"Audio generation failed: {str(e)}"
+                "error": f"Chat audio generation failed: {str(e)}"
             })
             
     except Exception as e:
@@ -731,7 +767,7 @@ async def handle_start_class(websocket: WebSocket, data: dict, teaching_service,
                 return
             
             with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+                 data = json.load(f)
             
             # Handle both single course and multi-course formats
             if isinstance(data, dict) and 'course_title' in data:
