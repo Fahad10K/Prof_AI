@@ -9,7 +9,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Optional
 from services.llm_service import LLMService
-from models.schemas import Quiz, QuizQuestion, QuizSubmission, QuizResult
+from models.schemas import Quiz, QuizQuestion, QuizSubmission, QuizResult, QuizDisplay, QuizQuestionDisplay
 import config
 
 class QuizService:
@@ -74,8 +74,8 @@ class QuizService:
                 module_week=module_week
             )
             
-            # Store quiz and answers
-            self._store_quiz(quiz)
+            # Store quiz and answers with course_id
+            self._store_quiz(quiz, course_content.get('course_id'))
             
             logging.info(f"Generated module quiz with {len(questions)} questions")
             return quiz
@@ -119,8 +119,8 @@ class QuizService:
                 module_week=None
             )
             
-            # Store quiz and answers
-            self._store_quiz(quiz)
+            # Store quiz and answers with course_id
+            self._store_quiz(quiz, course_content.get('course_id'))
             
             logging.info(f"Generated course quiz with {len(all_questions)} questions")
             return quiz
@@ -180,7 +180,7 @@ class QuizService:
             logging.error(f"Error evaluating quiz: {e}")
             raise e
     
-    def get_quiz_without_answers(self, quiz_id: str) -> Optional[Quiz]:
+    def get_quiz_without_answers(self, quiz_id: str) -> Optional[QuizDisplay]:
         """Get quiz for display (without correct answers)."""
         try:
             quiz_file = os.path.join(self.quiz_storage_dir, f"{quiz_id}.json")
@@ -190,14 +190,30 @@ class QuizService:
             with open(quiz_file, 'r', encoding='utf-8') as f:
                 quiz_data = json.load(f)
             
-            # Remove correct answers from questions
+            # Create display questions without correct answers
+            display_questions = []
             for question in quiz_data["questions"]:
-                if "correct_answer" in question:
-                    del question["correct_answer"]
-                if "explanation" in question:
-                    del question["explanation"]
+                display_question = QuizQuestionDisplay(
+                    question_id=question["question_id"],
+                    question_text=question["question_text"],
+                    options=question["options"],
+                    topic=question.get("topic", "")
+                )
+                display_questions.append(display_question)
             
-            return Quiz(**quiz_data)
+            # Create display quiz
+            display_quiz = QuizDisplay(
+                quiz_id=quiz_data["quiz_id"],
+                title=quiz_data["title"],
+                description=quiz_data["description"],
+                questions=display_questions,
+                total_questions=quiz_data["total_questions"],
+                quiz_type=quiz_data["quiz_type"],
+                module_week=quiz_data.get("module_week"),
+                course_id=quiz_data.get("course_id")
+            )
+            
+            return display_quiz
             
         except Exception as e:
             logging.error(f"Error loading quiz {quiz_id}: {e}")
@@ -361,13 +377,17 @@ EXPLANATION: [Brief explanation]"""
             topic=question_data.get('topic', '')
         )
     
-    def _store_quiz(self, quiz: Quiz):
+    def _store_quiz(self, quiz: Quiz, course_id: str = None):
         """Store quiz and answers separately."""
         try:
-            # Store full quiz data
+            # Store full quiz data with course_id
+            quiz_data = quiz.dict()
+            if course_id:
+                quiz_data['course_id'] = str(course_id)
+            
             quiz_file = os.path.join(self.quiz_storage_dir, f"{quiz.quiz_id}.json")
             with open(quiz_file, 'w', encoding='utf-8') as f:
-                json.dump(quiz.dict(), f, indent=2, ensure_ascii=False)
+                json.dump(quiz_data, f, indent=2, ensure_ascii=False)
             
             # Store answers separately for evaluation
             answers = {}
