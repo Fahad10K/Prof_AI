@@ -901,22 +901,50 @@ class ProfAIAgent:
             # Load from the same path as the HTTP endpoints use
             if os.path.exists(config.OUTPUT_JSON_PATH):
                 with open(config.OUTPUT_JSON_PATH, 'r', encoding='utf-8') as f:
-                    course_data = json.load(f)
+                    loaded = json.load(f)
                 
-                # Add course_id if provided
-                if course_id:
-                    course_data["course_id"] = course_id
-                
-                log(f"Course data loaded from {config.OUTPUT_JSON_PATH}: {len(course_data.get('modules', []))} modules")
-                return course_data
+                # Handle both single course (dict) and multi-course (list) formats
+                course_obj = None
+                if isinstance(loaded, dict) and 'course_title' in loaded:
+                    # Single course format
+                    course_obj = loaded
+                elif isinstance(loaded, list):
+                    # Multi-course format: find by course_id if provided, else use first course
+                    if course_id is not None:
+                        for c in loaded:
+                            if str(c.get("course_id", "")) == str(course_id):
+                                course_obj = c
+                                break
+                    # Fallback to first course if not found
+                    if course_obj is None and len(loaded) > 0:
+                        course_obj = loaded[0]
+                else:
+                    log(f"Invalid course data format in {config.OUTPUT_JSON_PATH}; using fallback")
+                    return self._create_fallback_course_data()
+
+                # Ensure course_id is set if provided
+                if course_obj is not None and course_id is not None:
+                    course_obj["course_id"] = course_id
+
+                # Log safely
+                modules_len = len(course_obj.get('modules', [])) if isinstance(course_obj, dict) else 0
+                log(f"Course data loaded from {config.OUTPUT_JSON_PATH}: {modules_len} modules")
+                return course_obj
             
             # Try to load from the document service as secondary option
             if hasattr(self, 'document_service') and self.document_service:
                 try:
-                    course_data = await self.document_service.get_all_courses()
-                    if course_data and len(course_data) > 0:
-                        course = course_data[0]
-                        if course_id:
+                    courses_list = await self.document_service.get_all_courses()
+                    if courses_list and len(courses_list) > 0:
+                        course = None
+                        if course_id is not None:
+                            for c in courses_list:
+                                if str(c.get("course_id", "")) == str(course_id):
+                                    course = c
+                                    break
+                        if course is None:
+                            course = courses_list[0]
+                        if course_id is not None:
                             course["course_id"] = course_id
                         log(f"Course data loaded from document service: {len(course.get('modules', []))} modules")
                         return course
@@ -926,7 +954,7 @@ class ProfAIAgent:
             # Final fallback
             log(f"No course data found at {config.OUTPUT_JSON_PATH}, using fallback")
             return self._create_fallback_course_data()
-            
+        
         except Exception as e:
             log(f"Error loading course data: {e}")
             return self._create_fallback_course_data()
