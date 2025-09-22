@@ -29,8 +29,7 @@ class DocumentService:
         """Process uploaded PDF files and generate course content."""
         try:
             # Clear and prepare documents directory
-            if os.path.exists(config.DOCUMENTS_DIR):
-                shutil.rmtree(config.DOCUMENTS_DIR)
+            self._safe_cleanup_directory(config.DOCUMENTS_DIR)
             os.makedirs(config.DOCUMENTS_DIR, exist_ok=True)
             
             # Save uploaded PDFs
@@ -66,14 +65,16 @@ class DocumentService:
 
             logging.info("STEP 3: Creating vector store...")
             vectorizer = Vectorizer(embedding_model=config.EMBEDDING_MODEL_NAME, api_key=config.OPENAI_API_KEY)
+            
+            # Clean up existing vector store safely
+            self._safe_cleanup_vectorstore()
+            
             vector_store = vectorizer.create_vector_store(doc_chunks)
             if not vector_store:
                 raise Exception("Vector store could not be created")
             
-            # Save vector store
-            if os.path.exists(config.VECTORSTORE_DIR):
-                shutil.rmtree(config.VECTORSTORE_DIR)
-            vectorizer.save_vector_store(vector_store, config.VECTORSTORE_DIR)
+            # Save vector store to FAISS directory (more reliable on Windows)
+            vectorizer.save_vector_store(vector_store, config.FAISS_DB_PATH)
 
             logging.info("STEP 4: Generating course...")
             course_generator = CourseGenerator()
@@ -111,6 +112,7 @@ class DocumentService:
         except Exception as e:
             logging.error(f"Error processing PDFs: {e}")
             raise e
+    
     def _validate_and_prepare_course(self, course, course_title: str = None):
         """Validate and prepare course data for saving."""
         try:
@@ -258,6 +260,71 @@ class DocumentService:
         except Exception as e:
             logging.error(f"Failed to save courses: {e}")
             raise ValueError(f"Failed to save courses: {e}")
+    
+    def _safe_cleanup_directory(self, directory_path: str, max_retries: int = 3):
+        """Safely clean up a directory with retries for Windows file locking issues."""
+        import time
+        
+        if not os.path.exists(directory_path):
+            return
+            
+        for attempt in range(max_retries):
+            try:
+                shutil.rmtree(directory_path)
+                logging.info(f"Successfully cleaned up directory: {directory_path}")
+                return
+            except PermissionError as e:
+                if attempt < max_retries - 1:
+                    logging.warning(f"Cleanup attempt {attempt + 1} failed, retrying in 1 second: {e}")
+                    time.sleep(1)
+                else:
+                    logging.error(f"Failed to cleanup directory after {max_retries} attempts: {e}")
+                    # Try to remove individual files if directory removal fails
+                    self._force_cleanup_directory(directory_path)
+            except Exception as e:
+                logging.error(f"Unexpected error during directory cleanup: {e}")
+                break
+    
+    def _force_cleanup_directory(self, directory_path: str):
+        """Force cleanup by removing individual files and subdirectories."""
+        try:
+            for root, dirs, files in os.walk(directory_path, topdown=False):
+                # Remove files
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    try:
+                        os.chmod(file_path, 0o777)  # Change permissions
+                        os.remove(file_path)
+                    except Exception as e:
+                        logging.warning(f"Could not remove file {file_path}: {e}")
+                
+                # Remove directories
+                for dir in dirs:
+                    dir_path = os.path.join(root, dir)
+                    try:
+                        os.rmdir(dir_path)
+                    except Exception as e:
+                        logging.warning(f"Could not remove directory {dir_path}: {e}")
+            
+            # Finally try to remove the root directory
+            try:
+                os.rmdir(directory_path)
+                logging.info(f"Force cleanup successful for: {directory_path}")
+            except Exception as e:
+                logging.warning(f"Could not remove root directory {directory_path}: {e}")
+                
+        except Exception as e:
+            logging.error(f"Force cleanup failed: {e}")
+    
+    def _safe_cleanup_vectorstore(self):
+        """Safely cleanup vector store directories."""
+        # Clean up both FAISS and Chroma directories
+        self._safe_cleanup_directory(config.FAISS_DB_PATH)
+        self._safe_cleanup_directory(config.CHROMA_DB_PATH)
+        
+        # Recreate the directories
+        os.makedirs(config.FAISS_DB_PATH, exist_ok=True)
+        os.makedirs(config.CHROMA_DB_PATH, exist_ok=True)
 
 
 class DocumentProcessor:
@@ -270,34 +337,37 @@ class DocumentProcessor:
         )
     
     def get_vectorstore(self, recreate: bool = False, documents: List[Document] = None):
-        """Get or create vectorstore."""
+        """Get or create vectorstore using FAISS (more reliable on Windows)."""
+        from langchain_community.vectorstores import FAISS
+        
         if recreate:
-            if os.path.exists(config.CHROMA_DB_PATH):
-                shutil.rmtree(config.CHROMA_DB_PATH)
+            # Use FAISS instead of Chroma to avoid Windows file locking issues
             if not documents:
                 raise ValueError("Documents must be provided when recreating vectorstore")
-            return Chroma.from_documents(
+            return FAISS.from_documents(
                 documents=documents,
-                embedding=self.embeddings,
-                persist_directory=config.CHROMA_DB_PATH,
-                collection_name=config.CHROMA_COLLECTION_NAME
+                embedding=self.embeddings
             )
         else:
-            if not os.path.exists(config.CHROMA_DB_PATH):
-                return None
-            return Chroma(
-                persist_directory=config.CHROMA_DB_PATH,
-                embedding_function=self.embeddings,
-                collection_name=config.CHROMA_COLLECTION_NAME
-            )
+            # Try to load existing FAISS vectorstore
+            if os.path.exists(config.FAISS_DB_PATH):
+                try:
+                    return FAISS.load_local(
+                        config.FAISS_DB_PATH, 
+                        self.embeddings, 
+                        allow_dangerous_deserialization=True
+                    )
+                except Exception as e:
+                    logging.warning(f"Could not load existing vectorstore: {e}")
+                    return None
+            return None
     
     def create_vectorstore_from_documents(self, documents: List[Document]):
-        """Create a new vectorstore from documents."""
-        return Chroma.from_documents(
+        """Create a new vectorstore from documents using FAISS."""
+        from langchain_community.vectorstores import FAISS
+        return FAISS.from_documents(
             documents=documents,
-            embedding=self.embeddings,
-            persist_directory=config.CHROMA_DB_PATH,
-            collection_name=config.CHROMA_COLLECTION_NAME
+            embedding=self.embeddings
         )
     
     def split_documents(self, documents: List[Document]) -> List[Document]:
