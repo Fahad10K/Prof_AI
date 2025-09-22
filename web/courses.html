@@ -50,7 +50,8 @@
     <script>
         // Detect if we're running from file:// or web server
         const isFileProtocol = window.location.protocol === 'file:';
-        const API_BASE_URL = isFileProtocol ? "http://127.0.0.1:5001" : "";
+        const isSecure = window.location.protocol === 'https:';
+        const API_BASE_URL = isFileProtocol ? 'http://127.0.0.1:5001' : (isSecure ? `https://${window.location.host}` : `http://${window.location.host}`);
         const coursesContainer = document.getElementById('coursesContainer');
         const loadingState = document.getElementById('loadingState');
 
@@ -87,7 +88,7 @@
                         courseUrl = `${currentDir}/course.html?course_id=${encodeURIComponent(course.course_id)}`;
                     } else {
                         // If running from web server, use relative URL
-                        courseUrl = `/course?course_id=${encodeURIComponent(course.course_id)}`;
+                        courseUrl = `course.html?course_id=${encodeURIComponent(course.course_id)}`;
                     }
                     console.log('Creating course link:', courseUrl);
 

@@ -137,8 +137,8 @@
 
     <script>
         // API Configuration
-        const isFileProtocol = window.location.protocol === 'file:';
-        const API_BASE_URL = isFileProtocol ? "http://127.0.0.1:5001" : "";
+        const isSecure = window.location.protocol === 'https:';
+        const API_BASE_URL = isSecure ? `https://${window.location.host}` : `http://${window.location.host}`;
 
         // DOM Elements
         const textInput = document.getElementById('textInput');

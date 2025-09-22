@@ -74,8 +74,8 @@
 
     <script>
         // Detect if we're running from file:// or web server
-        const isFileProtocol = window.location.protocol === 'file:';
-        const API_BASE_URL = isFileProtocol ? "http://127.0.0.1:5001" : "";
+        const isSecure = window.location.protocol === 'https:';
+        const API_BASE_URL = isSecure ? `https://${window.location.host}` : `http://${window.location.host}`;
         const courseNav = document.getElementById('courseNav');
         const courseTitleEl = document.getElementById('courseTitle');
         const mainContent = document.getElementById('mainContent');

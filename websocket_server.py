@@ -1232,7 +1232,7 @@ async def basic_websocket_handler(websocket_wrapper: ProfAIWebSocketWrapper, cli
                 log_disconnection(client_id, conn_e, "while sending error message in basic handler")
                 break
 
-async def start_websocket_server(host: str = "0.0.0.0", port: int = 8765):
+async def start_websocket_server(host: str, port: int):
     """
     Start the ProfAI WebSocket server with optimized configuration.
     """
@@ -1258,7 +1258,7 @@ async def start_websocket_server(host: str = "0.0.0.0", port: int = 8765):
         ):
             log(f"✅ ProfAI WebSocket server started successfully!")
             log(f"🌐 WebSocket URL: ws://{host}:{port}")
-            log(f"🧪 Test page: http://localhost:5001/profai-websocket-test")
+            log(f"🧪 Test page: http://{host}:5001/profai-websocket-test")
             log(f"📊 Quick test: python quick_test_websocket.py")
             await asyncio.Future()  # Run forever
     except OSError as e:
@@ -1280,10 +1280,11 @@ def main():
     Main entry point for the ProfAI WebSocket server.
     """
     import argparse
+import os
     
     parser = argparse.ArgumentParser(description='ProfAI WebSocket Server')
-    parser.add_argument('--host', default='0.0.0.0', help='Host to bind to (default: 0.0.0.0)')
-    parser.add_argument('--port', type=int, default=8765, help='Port to bind to (default: 8765)')
+    parser.add_argument('--host', default=os.getenv('WEBSOCKET_HOST', '0.0.0.0'), help='Host to bind to')
+    parser.add_argument('--port', type=int, default=int(os.getenv('WEBSOCKET_PORT', 8765)), help='Port to bind to')
     parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     
     args = parser.parse_args()

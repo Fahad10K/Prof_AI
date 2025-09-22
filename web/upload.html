@@ -145,7 +145,8 @@
     <script>
         // Detect if we're running from file:// or web server
         const isFileProtocol = window.location.protocol === 'file:';
-        const API_BASE_URL = isFileProtocol ? "http://127.0.0.1:5001" : "";
+        const isSecure = window.location.protocol === 'https:';
+        const API_BASE_URL = isFileProtocol ? 'http://127.0.0.1:5001' : (isSecure ? `https://${window.location.host}` : `http://${window.location.host}`);
         
         const uploadArea = document.getElementById('uploadArea');
         const fileInput = document.getElementById('fileInput');
@@ -298,7 +299,7 @@
                         const currentDir = window.location.href.substring(0, window.location.href.lastIndexOf('/'));
                         viewCourseBtn.href = `${currentDir}/course.html?course_id=${result.course_id}`;
                     } else {
-                        viewCourseBtn.href = `/course?course_id=${result.course_id}`;
+                        viewCourseBtn.href = `course.html?course_id=${result.course_id}`;
                     }
                     
                     submitBtn.disabled = false;
