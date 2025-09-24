@@ -31,16 +31,78 @@ class Vectorizer:
             return None
 
     def save_vector_store(self, vector_store, path: str):
-        """Saves the FAISS vector store to a local path."""
+        """Saves the FAISS vector store to a local path with Windows file lock handling."""
         if not vector_store:
             logging.error("Cannot save: Invalid vector store provided")
             return
-        try:
-            os.makedirs(path, exist_ok=True)
-            vector_store.save_local(path)
-            logging.info(f"Vector store saved successfully to {path}")
-        except Exception as e:
-            logging.error(f"Failed to save vector store: {e}")
+        
+        # CRITICAL: For FAISS vector stores, we need to manually detach any resources
+        # that might cause file locks before saving
+        if hasattr(vector_store, 'docstore'):
+            # Force docstore to release resources 
+            if hasattr(vector_store.docstore, '_dict'):
+                # Make copy of keys to avoid modification during iteration
+                keys = list(vector_store.docstore._dict.keys())
+                for key in keys:
+                    # Clean any potential file handles in document content
+                    if hasattr(vector_store.docstore._dict[key], 'page_content'):
+                        vector_store.docstore._dict[key].page_content = \
+                            str(vector_store.docstore._dict[key].page_content)
+            
+        import time
+        import gc
+        max_attempts = 3
+        attempt = 0
+        
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                # First ensure vector store is properly persisted and flushed
+                if hasattr(vector_store, 'persist'):
+                    try:
+                        vector_store.persist()
+                    except Exception as persist_error:
+                        logging.warning(f"Vector store persist warning (non-fatal): {persist_error}")
+                
+                # Double garbage collection to release handles
+                gc.collect()
+                time.sleep(0.5)  # Critical pause to let OS release locks
+                gc.collect()  # Second collection pass
+                
+                # Create directory and save
+                os.makedirs(path, exist_ok=True)
+                
+                # CRITICAL: On Windows, we need to properly disconnect before saving
+                # This is a workaround for the file lock issue
+                if hasattr(vector_store, '_client') and vector_store._client:
+                    try:
+                        # Try to disconnect any client connections
+                        if hasattr(vector_store._client, '_conn'):
+                            try:
+                                vector_store._client._conn.close()
+                            except:
+                                pass
+                    except Exception as client_error:
+                        logging.warning(f"Client cleanup warning: {client_error}")
+                
+                # Now save
+                vector_store.save_local(path)
+                logging.info(f"Vector store saved successfully to {path}")
+                return
+                
+            except PermissionError as pe:
+                if attempt < max_attempts:
+                    wait_time = 2 * attempt  # Stronger progressive backoff
+                    logging.warning(f"File access error, retrying in {wait_time}s: {pe}")
+                    time.sleep(wait_time)
+                    # Force more GC
+                    gc.collect()
+                else:
+                    logging.error(f"Failed to save vector store after {max_attempts} attempts: {pe}")
+                    raise
+            except Exception as e:
+                logging.error(f"Failed to save vector store: {e}")
+                raise
 
     @staticmethod
     def load_vector_store(path: str, embeddings):

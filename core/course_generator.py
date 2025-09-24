@@ -50,12 +50,96 @@ class CourseGenerator:
             raise e
     
     def _generate_curriculum(self, documents: List[Document], course_title: str = None) -> CourseLMS:
-        """Generate the curriculum structure."""
+        """Generate the curriculum structure with intelligent chunking for large documents."""
         if not documents:
             logging.error("Cannot generate curriculum: No documents provided")
             return None
+            
+        # Calculate approximate tokens for each document
+        def estimate_tokens(text):
+            # Rough approximation: 1 token ≈ 4 characters for English text
+            return len(text) // 4
         
-        context_str = "\n---\n".join([doc.page_content for doc in documents])
+        # Smart document sampling to stay within token limits
+        total_tokens = 0
+        max_tokens = 100000  # Keep safely under the 128K limit
+        selected_docs = []
+        sampling_rate = 1.0
+        
+        # First, count total estimated tokens
+        total_estimated = sum(estimate_tokens(doc.page_content) for doc in documents)
+        logging.info(f"Estimated total tokens in all documents: {total_estimated}")
+        
+        # If we're over the limit, we need to sample or truncate
+        if total_estimated > max_tokens:
+            # Determine sampling rate to stay under limit
+            sampling_rate = max_tokens / total_estimated
+            logging.info(f"Using sampling rate of {sampling_rate:.2f} to reduce token count")
+            
+        # Smart document processing strategies
+        if len(documents) > 100 or total_estimated > max_tokens * 1.5:
+            # Strategy 1: For very large documents, extract summaries and key sections
+            logging.info(f"Document set too large ({len(documents)} chunks). Using intelligent sampling...")
+            
+            # Group documents by similarity or source if possible
+            if all(hasattr(doc, 'metadata') and 'source' in doc.metadata for doc in documents):
+                # Group by source and sample from each group
+                from collections import defaultdict
+                source_groups = defaultdict(list)
+                for doc in documents:
+                    source_groups[doc.metadata['source']].append(doc)
+                
+                # Take representative samples from each source
+                for source, docs in source_groups.items():
+                    # Take docs from beginning, middle and end of each source
+                    if len(docs) <= 6:
+                        selected_docs.extend(docs)  # Take all if small enough
+                    else:
+                        # Sample strategically from beginning, middle, end
+                        selected_docs.extend(docs[:2])  # First 2
+                        selected_docs.extend(docs[len(docs)//2-1:len(docs)//2+1])  # Middle 2
+                        selected_docs.extend(docs[-2:])  # Last 2
+                        
+                        # Add some random samples from the rest
+                        import random
+                        remaining = [d for d in docs if d not in selected_docs]
+                        sample_size = min(int(len(remaining) * sampling_rate * 0.5), 20)
+                        selected_docs.extend(random.sample(remaining, sample_size))
+            else:
+                # No metadata available - use simple sampling
+                import random
+                sample_size = min(int(len(documents) * sampling_rate), 100)
+                selected_docs = random.sample(documents, sample_size)
+                # Always include first and last few documents
+                if documents[0] not in selected_docs:
+                    selected_docs.insert(0, documents[0])
+                if documents[-1] not in selected_docs:
+                    selected_docs.append(documents[-1])
+        else:
+            # For smaller document sets, we can use all docs or simple truncation
+            if total_estimated <= max_tokens:
+                selected_docs = documents
+            else:
+                # Simple truncation strategy - prioritize beginning and end content
+                front_docs = documents[:len(documents)//3]  # First third
+                end_docs = documents[-len(documents)//3:]   # Last third
+                
+                # Then sample from the middle
+                middle_docs = documents[len(documents)//3:-len(documents)//3]
+                sample_size = min(max_tokens - estimate_tokens(
+                    '\n'.join([d.page_content for d in (front_docs + end_docs)])
+                ), len(middle_docs))
+                
+                import random
+                middle_sample = random.sample(middle_docs, min(sample_size, len(middle_docs)))
+                selected_docs = front_docs + middle_sample + end_docs
+        
+        # Combine selected documents with section markers
+        context_str = "\n---\n".join([doc.page_content for doc in selected_docs])
+        
+        # Log the final token count
+        final_token_estimate = estimate_tokens(context_str)
+        logging.info(f"Final context has approximately {final_token_estimate} tokens from {len(selected_docs)} document chunks")
         
         template = """
         You are an expert instructional designer tasked with creating a university-level course curriculum.
@@ -66,10 +150,11 @@ class CourseGenerator:
 
         INSTRUCTIONS:
         1. Create a comprehensive course structure with a clear title.
-        2. Organize the content into weekly modules.
-        3. For each week, define a clear module title and a list of specific sub-topics to be covered.
+        2. Organize the content into weekly modules (between 8-12 weeks).
+        3. For each week, define a clear module title and 3-5 specific sub-topics to be covered.
         4. Ensure the learning path is logical and progressive.
-        5. The course should span a reasonable number of weeks based on the provided content.
+        5. Focus on the most important concepts and skills from the provided content.
+        6. If the context seems incomplete, focus on what's available and create a coherent structure.
         
         {format_instructions}
         """
