@@ -8,6 +8,7 @@ openai
 langchain
 langchain-community
 langchain-core
+langchain_groq
 langchain-openai
 chromadb
 sentence-transformers
