@@ -11,7 +11,7 @@ from fastapi import UploadFile
 from langchain_core.documents import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 
 import config
 
@@ -29,7 +29,8 @@ class DocumentService:
         """Process uploaded PDF files and generate course content."""
         try:
             # Clear and prepare documents directory
-            self._safe_cleanup_directory(config.DOCUMENTS_DIR)
+            if os.path.exists(config.DOCUMENTS_DIR):
+                shutil.rmtree(config.DOCUMENTS_DIR)
             os.makedirs(config.DOCUMENTS_DIR, exist_ok=True)
             
             # Save uploaded PDFs
@@ -52,33 +53,64 @@ class DocumentService:
             
             # Process documents
             logging.info("STEP 1: Extracting text from PDFs...")
-            extractor = PDFExtractor()
-            raw_docs = extractor.extract_text_from_directory(config.DOCUMENTS_DIR)
+            # Use DocumentProcessor method instead of direct PDFExtractor call
+            raw_docs = self.document_processor.extract_text_from_directory(config.DOCUMENTS_DIR)
             if not raw_docs:
                 raise Exception("No text could be extracted from uploaded documents")
 
             logging.info("STEP 2: Chunking documents...")
-            chunker = TextChunker(chunk_size=config.CHUNK_SIZE, chunk_overlap=config.CHUNK_OVERLAP)
-            doc_chunks = chunker.chunk_documents(raw_docs)
+            # Use DocumentProcessor method for chunking too
+            doc_chunks = self.document_processor.chunk_documents(raw_docs)
             if not doc_chunks:
                 raise Exception("No chunks could be created from documents")
 
             logging.info("STEP 3: Creating vector store...")
             vectorizer = Vectorizer(embedding_model=config.EMBEDDING_MODEL_NAME, api_key=config.OPENAI_API_KEY)
-            
-            # Clean up existing vector store safely
-            self._safe_cleanup_vectorstore()
-            
             vector_store = vectorizer.create_vector_store(doc_chunks)
             if not vector_store:
                 raise Exception("Vector store could not be created")
             
-            # Save vector store to FAISS directory (more reliable on Windows)
-            vectorizer.save_vector_store(vector_store, config.FAISS_DB_PATH)
+            # Save vector store - using versioned approach instead of deletion
+            import uuid
+            import datetime
+            
+            # Create a timestamped backup directory if old one exists
+            if os.path.exists(config.VECTORSTORE_DIR):
+                backup_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_dir = f"{config.VECTORSTORE_DIR}_backup_{backup_timestamp}"
+                try:
+                    # Try to rename instead of delete - much safer on Windows
+                    os.rename(config.VECTORSTORE_DIR, backup_dir)
+                    logging.info(f"Previous vectorstore backed up to {backup_dir}")
+                except Exception as e:
+                    # If rename fails, use a new directory with UUID
+                    new_uuid = str(uuid.uuid4())[:8]
+                    new_vector_dir = f"{config.VECTORSTORE_DIR}_{new_uuid}"
+                    logging.warning(f"Could not backup old vectorstore: {e}, using new directory: {new_vector_dir}")
+                    config.VECTORSTORE_DIR = new_vector_dir
+            
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(config.VECTORSTORE_DIR), exist_ok=True)
+            
+            # Now save the vector store to clean directory
+            vectorizer.save_vector_store(vector_store, config.VECTORSTORE_DIR)
 
             logging.info("STEP 4: Generating course...")
             course_generator = CourseGenerator()
-            final_course = course_generator.generate_course(doc_chunks, vector_store.as_retriever(), course_title)
+            
+            # Use retriever and immediately dispose of vector_store to prevent locks
+            try:
+                retriever = vector_store.as_retriever()
+                final_course = course_generator.generate_course(doc_chunks, retriever, course_title)
+            finally:
+                # Clean up vector store connection to prevent file locks
+                if hasattr(vector_store, '_client') and vector_store._client:
+                    try:
+                        vector_store._client.reset()
+                        logging.info("   Vector store client connection cleaned up")
+                    except Exception as cleanup_error:
+                        logging.warning(f"   Vector store cleanup failed: {cleanup_error}")
+                vector_store = None  # Release reference
             
             if not final_course:
                 raise Exception("Course generation failed")
@@ -111,6 +143,12 @@ class DocumentService:
              
         except Exception as e:
             logging.error(f"Error processing PDFs: {e}")
+            # Ensure cleanup on error to prevent file locks
+            try:
+                import gc
+                gc.collect()
+            except:
+                pass
             raise e
     
     def _validate_and_prepare_course(self, course, course_title: str = None):
@@ -260,115 +298,197 @@ class DocumentService:
         except Exception as e:
             logging.error(f"Failed to save courses: {e}")
             raise ValueError(f"Failed to save courses: {e}")
-    
-    def _safe_cleanup_directory(self, directory_path: str, max_retries: int = 3):
-        """Safely clean up a directory with retries for Windows file locking issues."""
-        import time
-        
-        if not os.path.exists(directory_path):
-            return
-            
-        for attempt in range(max_retries):
-            try:
-                shutil.rmtree(directory_path)
-                logging.info(f"Successfully cleaned up directory: {directory_path}")
-                return
-            except PermissionError as e:
-                if attempt < max_retries - 1:
-                    logging.warning(f"Cleanup attempt {attempt + 1} failed, retrying in 1 second: {e}")
-                    time.sleep(1)
-                else:
-                    logging.error(f"Failed to cleanup directory after {max_retries} attempts: {e}")
-                    # Try to remove individual files if directory removal fails
-                    self._force_cleanup_directory(directory_path)
-            except Exception as e:
-                logging.error(f"Unexpected error during directory cleanup: {e}")
-                break
-    
-    def _force_cleanup_directory(self, directory_path: str):
-        """Force cleanup by removing individual files and subdirectories."""
-        try:
-            for root, dirs, files in os.walk(directory_path, topdown=False):
-                # Remove files
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    try:
-                        os.chmod(file_path, 0o777)  # Change permissions
-                        os.remove(file_path)
-                    except Exception as e:
-                        logging.warning(f"Could not remove file {file_path}: {e}")
-                
-                # Remove directories
-                for dir in dirs:
-                    dir_path = os.path.join(root, dir)
-                    try:
-                        os.rmdir(dir_path)
-                    except Exception as e:
-                        logging.warning(f"Could not remove directory {dir_path}: {e}")
-            
-            # Finally try to remove the root directory
-            try:
-                os.rmdir(directory_path)
-                logging.info(f"Force cleanup successful for: {directory_path}")
-            except Exception as e:
-                logging.warning(f"Could not remove root directory {directory_path}: {e}")
-                
-        except Exception as e:
-            logging.error(f"Force cleanup failed: {e}")
-    
-    def _safe_cleanup_vectorstore(self):
-        """Safely cleanup vector store directories."""
-        # Clean up both FAISS and Chroma directories
-        self._safe_cleanup_directory(config.FAISS_DB_PATH)
-        self._safe_cleanup_directory(config.CHROMA_DB_PATH)
-        
-        # Recreate the directories
-        os.makedirs(config.FAISS_DB_PATH, exist_ok=True)
-        os.makedirs(config.CHROMA_DB_PATH, exist_ok=True)
 
 
 class DocumentProcessor:
     """Helper class for document processing operations."""
     
     def __init__(self):
+        from processors.pdf_extractor import PDFExtractor
+        from processors.text_chunker import TextChunker
+        
         self.embeddings = OpenAIEmbeddings(
             model=config.EMBEDDING_MODEL_NAME, 
             openai_api_key=config.OPENAI_API_KEY
         )
+        self.pdf_extractor = PDFExtractor()
+        self.text_chunker = TextChunker(chunk_size=config.CHUNK_SIZE, chunk_overlap=config.CHUNK_OVERLAP)
+        
+    def extract_text_from_directory(self, directory_path: str):
+        """Extract text from all PDFs in a directory using PDFExtractor."""
+        return self.pdf_extractor.extract_text_from_directory(directory_path)
+        
+    def chunk_documents(self, documents):
+        """Split documents into chunks using TextChunker."""
+        # Initialize TextChunker with config values if not already done
+        if not hasattr(self, 'text_chunker') or self.text_chunker is None:
+            self.text_chunker = TextChunker(chunk_size=config.CHUNK_SIZE, chunk_overlap=config.CHUNK_OVERLAP)
+            
+        return self.text_chunker.chunk_documents(documents)
     
     def get_vectorstore(self, recreate: bool = False, documents: List[Document] = None):
-        """Get or create vectorstore using FAISS (more reliable on Windows)."""
-        from langchain_community.vectorstores import FAISS
+        """Get or create vectorstore with proper cleanup handling."""
+        import time
+        import gc
+        from pathlib import Path
+        
+        # Aggressive cleanup to prevent locks
+        self._cleanup_existing_connections()
+        gc.collect()
+        time.sleep(0.2)
         
         if recreate:
-            # Use FAISS instead of Chroma to avoid Windows file locking issues
+            chroma_path = Path(config.CHROMA_DB_PATH)
+            if chroma_path.exists():
+                # Aggressive retry removal with per-file handling for Windows
+                max_attempts = 5
+                for attempt in range(max_attempts):
+                    try:
+                        # Try different approaches with increasing aggressiveness
+                        if attempt == 0:
+                            # Standard removal first
+                            shutil.rmtree(chroma_path)
+                            break
+                        elif attempt == 1:
+                            # Short delay and retry
+                            time.sleep(1)
+                            shutil.rmtree(chroma_path)
+                            break
+                        elif attempt >= 2:
+                            # File-by-file deletion as last resort
+                            self._safe_remove_directory(chroma_path)
+                            break
+                    except PermissionError as e:
+                        if attempt == max_attempts - 1:
+                            logging.warning(f"Could not fully remove ChromaDB directory after {max_attempts} attempts. Some files may remain: {e}")
+                        else:
+                            logging.debug(f"Removal attempt {attempt+1} failed, retrying with different approach: {e}")
+                        time.sleep(0.5 * (attempt + 1))  # Increasing delay with each retry
+                    except Exception as e:
+                        logging.warning(f"Error while removing ChromaDB directory: {e}")
+                        break
+                
+            # Create parent directories if they don't exist
+            chroma_path.parent.mkdir(parents=True, exist_ok=True)
+                    
             if not documents:
                 raise ValueError("Documents must be provided when recreating vectorstore")
-            return FAISS.from_documents(
-                documents=documents,
-                embedding=self.embeddings
-            )
+                
+            try:
+                # Create fresh vectorstore with updated parameters for new ChromaDB
+                vectorstore = Chroma.from_documents(
+                    documents=documents,
+                    embedding=self.embeddings,
+                    persist_directory=str(chroma_path),
+                    collection_name=config.CHROMA_COLLECTION_NAME,
+                    collection_metadata={"hnsw:space": "cosine"}
+                )
+                return vectorstore
+            except Exception as e:
+                logging.error(f"Failed to create ChromaDB: {e}")
+                raise
         else:
-            # Try to load existing FAISS vectorstore
-            if os.path.exists(config.FAISS_DB_PATH):
-                try:
-                    return FAISS.load_local(
-                        config.FAISS_DB_PATH, 
-                        self.embeddings, 
-                        allow_dangerous_deserialization=True
-                    )
-                except Exception as e:
-                    logging.warning(f"Could not load existing vectorstore: {e}")
-                    return None
-            return None
+            if not os.path.exists(config.CHROMA_DB_PATH):
+                return None
+                
+            try:
+                # Open existing with explicit client settings
+                # Updated ChromaDB client creation
+                vectorstore = Chroma(
+                    persist_directory=config.CHROMA_DB_PATH,
+                    embedding_function=self.embeddings,
+                    collection_name=config.CHROMA_COLLECTION_NAME,
+                    collection_metadata={"hnsw:space": "cosine"}
+                )
+                return vectorstore
+            except Exception as e:
+                logging.error(f"Failed to open ChromaDB: {e}")
+                raise
     
     def create_vectorstore_from_documents(self, documents: List[Document]):
-        """Create a new vectorstore from documents using FAISS."""
-        from langchain_community.vectorstores import FAISS
-        return FAISS.from_documents(
+        """Create a new vectorstore from documents with proper cleanup."""
+        # Clean up any existing connections first
+        self._cleanup_existing_connections()
+        
+        # Updated ChromaDB client creation
+        return Chroma.from_documents(
             documents=documents,
-            embedding=self.embeddings
+            embedding=self.embeddings,
+            persist_directory=config.CHROMA_DB_PATH,
+            collection_name=config.CHROMA_COLLECTION_NAME,
+            collection_metadata={"hnsw:space": "cosine"}
         )
+    
+    def _cleanup_existing_connections(self):
+        """Clean up any existing ChromaDB connections to prevent file locks."""
+        try:
+            # Force garbage collection to clean up connections
+            import gc
+            gc.collect()
+            
+            # Small delay to ensure cleanup
+            import time
+            time.sleep(0.1)
+            
+            logging.debug("   Cleaned up existing connections")
+        except Exception as e:
+            logging.debug(f"   Connection cleanup warning: {e}")
+    
+    def _safe_remove_directory(self, directory_path):
+        """Safely remove a directory file by file - last resort for locked files on Windows."""
+        from pathlib import Path
+        import time
+        import gc
+        
+        directory = Path(directory_path)
+        if not directory.exists():
+            return
+            
+        # Force garbage collection to release file handles
+        gc.collect()
+        time.sleep(0.5)
+        
+        # First try to remove files
+        for item in directory.glob('**/*'):
+            if item.is_file():
+                try:
+                    item.unlink()
+                    logging.debug(f"Removed file: {item}")
+                except Exception as e:
+                    logging.debug(f"Could not remove file {item}: {e}")
+        
+        # Then try to remove empty directories from bottom up
+        for item in sorted([d for d in directory.glob('**/*') if d.is_dir()], reverse=True):
+            try:
+                item.rmdir()
+                logging.debug(f"Removed directory: {item}")
+            except Exception as e:
+                logging.debug(f"Could not remove directory {item}: {e}")
+        
+        # Finally try to remove the root directory
+        try:
+            directory.rmdir()
+            logging.info(f"Removed directory: {directory}")
+        except Exception as e:
+            logging.warning(f"Could not remove root directory {directory}: {e}")
+    
+    def dispose_vectorstore(self, vectorstore):
+        """Properly dispose of a vectorstore to prevent file locks."""
+        if not vectorstore:
+            return
+            
+        try:
+            # Try to reset the client connection if it exists
+            if hasattr(vectorstore, '_client') and vectorstore._client:
+                vectorstore._client.reset()
+                logging.info("   ChromaDB client connection disposed")
+        except Exception as e:
+            logging.warning(f"   Vectorstore disposal warning: {e}")
+        finally:
+            # Force cleanup
+            vectorstore = None
+            import gc
+            gc.collect()
     
     def split_documents(self, documents: List[Document]) -> List[Document]:
         """Split documents into chunks."""
